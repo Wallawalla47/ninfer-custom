@@ -70,7 +70,6 @@ void nvfp4_linear_add_w4a4_launch(const Tensor& x, const Weight& weight, Tensor&
     if (w4a4_tma_route(tokens)) {
         const float alpha = 1.0F / (weight.input_scale_divisor * weight.weight_scale_divisor);
         launch_nvfp4_w4a4_tma_linear_add(problem, workspace.codes, workspace.scales,
-                                         workspace.tma_descriptor_storage,
                                          static_cast<const std::uint8_t*>(weight.qdata),
                                          static_cast<const std::uint8_t*>(weight.scales),
                                          static_cast<__nv_bfloat16*>(residual.data), tokens, alpha,

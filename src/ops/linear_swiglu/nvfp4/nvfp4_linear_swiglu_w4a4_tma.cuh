@@ -74,17 +74,8 @@ __global__ __launch_bounds__(
     const int pair_begin  = block_x * kPairN;
 
 #ifdef _WIN32
-    if (threadIdx.x == 0) {
-        const cuda::ptx::n32_t<128> descriptor_bytes;
-        cuda::ptx::fence_proxy_tensormap_generic(cuda::ptx::sem_acquire, cuda::ptx::scope_sys,
-                                                  &descriptors_pointer->a_codes, descriptor_bytes);
-        cuda::ptx::fence_proxy_tensormap_generic(cuda::ptx::sem_acquire, cuda::ptx::scope_sys,
-                                                  &descriptors_pointer->b_codes, descriptor_bytes);
-        cuda::ptx::fence_proxy_tensormap_generic(cuda::ptx::sem_acquire, cuda::ptx::scope_sys,
-                                                  &descriptors_pointer->a_scales, descriptor_bytes);
-        cuda::ptx::fence_proxy_tensormap_generic(cuda::ptx::sem_acquire, cuda::ptx::scope_sys,
-                                                  &descriptors_pointer->b_scales, descriptor_bytes);
-    }
+    // The descriptors are staged into a stream-owned device buffer by the launcher; the TMA proxy
+    // reads them directly, so no per-CTA tensormap fence is required.
     const Nvfp4W4a4TmaDescriptors& descriptors = *descriptors_pointer;
 #endif
 

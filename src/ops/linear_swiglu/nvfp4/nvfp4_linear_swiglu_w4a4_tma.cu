@@ -58,7 +58,6 @@ Nvfp4W4a4TmaDescriptors make_descriptors(const std::uint8_t* activation_codes,
 
 void launch_nvfp4_linear_swiglu_w4a4_tma(const std::uint8_t* activation_codes,
                                          const std::uint8_t* activation_scales,
-                                         void* descriptor_storage,
                                          const std::uint8_t* weight_codes,
                                          const std::uint8_t* weight_scales, __nv_bfloat16* output,
                                          std::int32_t tokens, float alpha, cudaStream_t stream) {
@@ -79,23 +78,40 @@ void launch_nvfp4_linear_swiglu_w4a4_tma(const std::uint8_t* activation_codes,
 
     const Nvfp4W4a4TmaDescriptors descriptors = make_descriptors<Geometry, M256N128S3>(
         activation_codes, activation_scales, weight_codes, weight_scales, tokens);
-#ifdef _WIN32
-    CUDA_CHECK(cudaMemcpyAsync(descriptor_storage, &descriptors, sizeof(descriptors),
-                               cudaMemcpyHostToDevice, stream));
-#else
-    (void)descriptor_storage;
-#endif
     constexpr int kPairN = M256N128S3::kBlockN / 2;
     const dim3 grid((Geometry::kOutputRows / 2) / kPairN, tokens / M256N128S3::kBlockM);
-    nvfp4_linear_swiglu_w4a4_tma_kernel<Geometry, M256N128S3>
-        <<<grid, M256N128S3::kThreads, kSharedBytes, stream>>>(
 #ifdef _WIN32
-            static_cast<const Nvfp4W4a4TmaDescriptors*>(descriptor_storage),
-#else
-            descriptors,
-#endif
-            alpha, output);
+    // MSVC cannot pass the over-aligned (alignas(128)) CUtensorMap struct by value as a
+    // __grid_constant__ parameter, so the descriptors are staged into device global memory; the
+    // kernel reads them there and makes them visible to the TMA (tensormap) proxy with a
+    // fence.proxy.tensormap acquire (see kernel). The host source of the cudaMemcpyAsync must
+    // stay live while the copy may be captured, so a persistent pinned buffer holds it, and the
+    // device destination is likewise persistent: a per-launch cudaMallocAsync/cudaFreeAsync
+    // round-trip stalls the stream ~500 us per launch, while the engine serializes every TMA
+    // launch onto one compute stream, so in-stream ordering guarantees the next launch's copy
+    // cannot start until this launch's kernel has read the buffer. Both buffers are shared
+    // across calls and never freed (one 512-byte allocation each, reclaimed at process exit).
+    static Nvfp4W4a4TmaDescriptors* persistent_host = [] {
+        void* p = nullptr;
+        CUDA_CHECK(cudaMallocHost(&p, sizeof(Nvfp4W4a4TmaDescriptors)));
+        return reinterpret_cast<Nvfp4W4a4TmaDescriptors*>(p);
+    }();
+    static Nvfp4W4a4TmaDescriptors* persistent_device = [] {
+        void* p = nullptr;
+        CUDA_CHECK(cudaMalloc(&p, sizeof(Nvfp4W4a4TmaDescriptors)));
+        return reinterpret_cast<Nvfp4W4a4TmaDescriptors*>(p);
+    }();
+    *persistent_host = descriptors;
+    CUDA_CHECK(cudaMemcpyAsync(persistent_device, persistent_host, sizeof(Nvfp4W4a4TmaDescriptors),
+                               cudaMemcpyHostToDevice, stream));
+    nvfp4_linear_swiglu_w4a4_tma_kernel<Geometry, M256N128S3>
+        <<<grid, M256N128S3::kThreads, kSharedBytes, stream>>>(persistent_device, alpha, output);
     CUDA_CHECK(cudaGetLastError());
+#else
+    nvfp4_linear_swiglu_w4a4_tma_kernel<Geometry, M256N128S3>
+        <<<grid, M256N128S3::kThreads, kSharedBytes, stream>>>(descriptors, alpha, output);
+    CUDA_CHECK(cudaGetLastError());
+#endif
 }
 
 } // namespace ninfer::ops::detail
