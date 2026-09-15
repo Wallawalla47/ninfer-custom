@@ -19,13 +19,9 @@ void launch_quantize_exact(const Tensor& x, const Weight& weight, Nvfp4W4a4Works
                            Nvfp4ScaleLayout layout, cudaStream_t stream) {
     const std::int32_t tokens = x.ne[1];
     constexpr int kThreads    = 256;
+    const std::int32_t tasks  = tokens * ActivationGeometry::kGroupsPerRow;
+    const int blocks          = (tasks + kThreads - 1) / kThreads;
     const auto* input         = static_cast<const __nv_bfloat16*>(x.data);
-    // The tiled plane is allocated and addressed over whole tiles, so its launch has to reach the
-    // padding of the last one; the row-major plane stops at the real token count.
-    const std::int32_t written_tokens =
-        layout == Nvfp4ScaleLayout::Tiled ? nvfp4_w4a4_padded_tokens(tokens) : tokens;
-    const std::int32_t tasks = written_tokens * ActivationGeometry::kGroupsPerRow;
-    const int blocks         = (tasks + kThreads - 1) / kThreads;
     // The tiled plane exists only for a K whose group count divides into whole tiles. Registered
     // Ks all do; gating the instantiation keeps a future K that does not out of a hard compile
     // error and into a runtime message.
@@ -33,7 +29,7 @@ void launch_quantize_exact(const Tensor& x, const Weight& weight, Nvfp4W4a4Works
         if (layout == Nvfp4ScaleLayout::Tiled) {
             nvfp4_w4a4_quantize_kernel<ActivationGeometry, kThreads, Nvfp4ScaleLayout::Tiled>
                 <<<blocks, kThreads, 0, stream>>>(input, workspace.codes, workspace.scales, tokens,
-                                                  written_tokens, weight.input_scale_divisor);
+                                                  weight.input_scale_divisor);
             CUDA_CHECK(cudaGetLastError());
             return;
         }
@@ -42,7 +38,7 @@ void launch_quantize_exact(const Tensor& x, const Weight& weight, Nvfp4W4a4Works
     }
     nvfp4_w4a4_quantize_kernel<ActivationGeometry, kThreads, Nvfp4ScaleLayout::RowMajor>
         <<<blocks, kThreads, 0, stream>>>(input, workspace.codes, workspace.scales, tokens,
-                                          written_tokens, weight.input_scale_divisor);
+                                          weight.input_scale_divisor);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -53,16 +49,10 @@ void launch_nvfp4_w4a4_quantize(const Tensor& x, const Weight& weight, Nvfp4W4a4
     if (workspace.codes == nullptr || workspace.scales == nullptr) {
         throw std::invalid_argument("nvfp4 W4A4 requires caller workspace");
     }
-    // The tiled layout writes the padding of the last tile, so it needs a plane allocated over the
-    // padded token count. Check that here, where the layout is acted on, rather than trust each
-    // caller to have sized it that way.
-    if (layout == Nvfp4ScaleLayout::Tiled) {
-        const std::size_t needed = static_cast<std::size_t>(nvfp4_w4a4_padded_tokens(x.ne[1])) *
-                                   (static_cast<std::size_t>(weight.k) / 16);
-        if (workspace.scale_bytes < needed) {
-            throw std::invalid_argument(
-                "nvfp4 W4A4 tiled scales need a plane allocated over whole token tiles");
-        }
+    // The tiled layout is a bijection onto the scale plane only for a whole number of token tiles.
+    // Check it where the layout is acted on rather than trusting each caller's own predicate.
+    if (layout == Nvfp4ScaleLayout::Tiled && (x.ne[1] % kNvfp4TmaBlockM) != 0) {
+        throw std::invalid_argument("nvfp4 W4A4 tiled scales need a whole number of token tiles");
     }
     switch (weight.k) {
     case Nvfp4Activation5120Geometry::kInputRows:
