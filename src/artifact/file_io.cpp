@@ -37,7 +37,7 @@ off_t file_offset(std::uint64_t offset) {
 #ifdef _WIN32
 // The Win32 path delegates to the shared read-only file abstraction (memory-mapped reads plus
 // an unbuffered handle for direct I/O); the POSIX path keeps positional pread on a raw fd.
-InputFile::InputFile(std::filesystem::path path) : path_(std::move(path)), file_(path) {
+InputFile::InputFile(std::filesystem::path path) : path_(path), file_(path) {
     bytes_ = static_cast<std::uint64_t>(file_.mapped_bytes().size());
 }
 #endif
