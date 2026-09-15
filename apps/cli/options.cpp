@@ -155,6 +155,15 @@ Options parse_options(int argc, char** argv) {
             options.raw_output = true;
         } else if (arg == "--print-token-ids") {
             options.print_token_ids = true;
+        } else if (arg == "--log-colours") {
+            const std::string_view mode = value(arg);
+            if (mode == "on") {
+                options.log_colours = true;
+            } else if (mode == "off") {
+                options.log_colours = false;
+            } else {
+                throw std::invalid_argument("--log-colours accepts on or off");
+            }
         } else if (arg == "--no-thinking") {
             options.enable_thinking = false;
         } else if (arg == "--thinking-budget") {
