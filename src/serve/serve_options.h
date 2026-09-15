@@ -27,6 +27,8 @@ struct ServeOptions {
     int port         = 8080;
     std::string api_key;                          // empty => no auth
     std::optional<std::string> model_id_override; // unset => artifact metadata.name
+    // Optional startup override for the artifact's frontend/chat_template.jinja.
+    std::filesystem::path chat_template_path;
     std::string request_log_jsonl;                // empty => structured request logging disabled
     std::uint32_t max_context          = 8192;
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(8192);

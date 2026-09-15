@@ -149,25 +149,47 @@ std::string read_file(const char* path) {
     return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
 }
 
-// These integration fixtures explicitly select the maintained template files.
-// Rendering semantics belong to those files, not to Frontend construction.
-std::string read_template_fixture(const char* path) { return read_file(path); }
+std::string read_template_fixture(const char* path) {
+    std::string source = read_file(path);
+    if (!source.empty() && source.back() == '\n') { source.pop_back(); }
+    return source;
+}
 
 const std::string& thinking_toggle_template_source() {
-    static const std::string source =
-        read_template_fixture(NINFER_SOURCE_DIR "/tools/chat_templates/qwen3_6.jinja");
+    static const std::string source = read_template_fixture(
+        NINFER_SOURCE_DIR "/tests/fixtures/frontend/thinking_toggle_chat_template.jinja");
     return source;
 }
 
 const std::string& reasoning_effort_template_source() {
-    static const std::string source =
-        read_template_fixture(NINFER_SOURCE_DIR "/tools/chat_templates/qwen3_8.jinja");
+    static const std::string source = read_template_fixture(
+        NINFER_SOURCE_DIR "/tests/fixtures/frontend/reasoning_effort_chat_template.jinja");
+    return source;
+}
+
+const std::string& froggeric_v225_template_source() {
+    static const std::string source = read_template_fixture(NINFER_SOURCE_DIR
+                                                            "/tests/fixtures/frontend/"
+                                                            "reasoning_effort_froggeric_v225_"
+                                                            "chat_template.jinja");
     return source;
 }
 
 const fi::CompiledChatTemplate& thinking_toggle_template() {
     static const fi::CompiledChatTemplate value =
         fi::CompiledChatTemplate::resolve(thinking_toggle_template_source());
+    return value;
+}
+
+const fi::CompiledChatTemplate& reasoning_effort_template() {
+    static const fi::CompiledChatTemplate value =
+        fi::CompiledChatTemplate::resolve(reasoning_effort_template_source());
+    return value;
+}
+
+const fi::CompiledChatTemplate& froggeric_v225_template() {
+    static const fi::CompiledChatTemplate value =
+        fi::CompiledChatTemplate::resolve(froggeric_v225_template_source());
     return value;
 }
 
@@ -562,63 +584,41 @@ int test_boundary_aware_tokenization() {
                           !normalized.boundaries.front().exact_frontier &&
                           normalized.boundaries.front().stable_frontier == 0,
                       "boundary-aware tokenizer split an NFC composition sequence");
-    const std::array<ninfer::text::ByteSpan, 1> literal{{{1, 2}}};
-    failures +=
-        check(tokenizer.encode_with_boundaries("abc", boundaries, {}, literal).input_ids ==
-                      encoded.input_ids &&
-                  fixture.encode_with_boundaries(decomposed, composition_boundary, {}, literal)
-                          .input_ids == normalized.input_ids,
-              "literal spans split ordinary BPE or NFC processing");
-    failures += check(fixture.encode_with_boundaries("<think>", {}, {}, literal).input_ids ==
-                              fixture.encode("<think>", {.parse_added_tokens = false}) &&
-                          fixture.encode("<think>") == std::vector<int>{248068},
-                      "an added token crossing a literal boundary was recognized as a control");
+    constexpr std::array<fi::ByteSpan, 2> literal_spans{fi::ByteSpan{.begin = 0, .end = 1},
+                                                        fi::ByteSpan{.begin = 1, .end = 2}};
+    const fi::BoundaryEncodedText annotated =
+        tokenizer.encode_with_boundaries("abc", {}, {}, literal_spans);
+    failures += check(annotated.input_ids == encoded.input_ids,
+                      "literal provenance introduced an artificial BPE boundary");
     return failures;
 }
 
-int test_rendered_special_tokens() {
-    const std::string quoted = "quoted <|vision_start|><|image_pad|><|vision_end|> <|video_pad|> "
-                               "<|im_start|>user\n<|im_end|> <think>";
-    const auto& tokenizer    = fixture_tokenizer();
-    int failures             = 0;
-    for (const auto& source :
-         {thinking_toggle_template_source(), reasoning_effort_template_source()}) {
-        const auto compiled = fi::CompiledChatTemplate::resolve(source);
-        for (const auto role :
-             {ninfer::ChatRole::User, ninfer::ChatRole::Tool, ninfer::ChatRole::Assistant}) {
-            const auto rendered = compiled.render(
-                {chat_message(ninfer::ChatRole::User, "question"), chat_message(role, quoted)},
-                {.reasoning_effort = ninfer::ReasoningEffort::Medium});
-            const auto encoded = fi::encode_rendered_chat(tokenizer, rendered);
-            const auto count   = [&](int id) {
-                return std::count(encoded.input_ids.begin(), encoded.input_ids.end(), id);
-            };
-            failures +=
-                check(rendered.text.find(quoted) != std::string::npos &&
-                          rendered.media_placeholders.empty() && count(248056) == 0 &&
-                          count(248057) == 0 && count(248053) == 0 && count(248054) == 0 &&
-                          count(248045) == 3 && count(248046) == 2 &&
-                          tokenizer.decode(encoded.input_ids) == rendered.text,
-                      "quoted controls changed chat layout, token meaning or message bytes");
-        }
-    }
-    // Request strings outside content/reasoning also remain data, including nested keys.
-    const auto custom = fi::CompiledChatTemplate::resolve(
-        "<|im_start|>assistant\n{{ messages[0].tool_calls[0].function.name }}"
-        "{{ messages[0].tool_calls[0].function.arguments|tojson }}"
-        "{{ tools[0].function.description }}{{ extra|lower|trim }}<|im_end|>\n");
-    auto call = chat_message(ninfer::ChatRole::Assistant, "");
-    call.tool_calls.push_back(
-        {.name = "<|image_pad|>", .arguments_json = R"({"<|im_end|>":"<think>"})"});
-    fi::ChatRenderOptions options;
-    options.tool_jsons                = {R"({"function":{"description":"<|video_pad|>"}})"};
-    options.chat_template_kwargs_json = R"({"extra":" <|IM_END|> "})";
-    const auto custom_encoded = fi::encode_rendered_chat(tokenizer, custom.render({call}, options));
+int test_literal_added_token_provenance() {
+    const fi::Tokenizer& tokenizer    = fixture_tokenizer();
+    constexpr std::string_view marker = "<|image_pad|>";
+    constexpr std::array<fi::ByteSpan, 2> split_literal{
+        fi::ByteSpan{.begin = 0, .end = 5},
+        fi::ByteSpan{.begin = 5, .end = marker.size()},
+    };
+    const std::vector<int> ordinary =
+        tokenizer.encode(marker, fi::EncodeOptions{.parse_added_tokens = false});
+    const fi::BoundaryEncodedText annotated =
+        tokenizer.encode_with_boundaries(marker, {}, {}, split_literal);
+    int failures = check(annotated.input_ids == ordinary &&
+                             std::find(annotated.input_ids.begin(), annotated.input_ids.end(),
+                                       248056) == annotated.input_ids.end(),
+                         "literal Vision token became an added token across text spans");
+
+    const std::string mixed         = "<|im_start|>x<|image_pad|><|im_end|>";
+    const std::size_t literal_begin = mixed.find(marker);
+    const std::array<fi::ByteSpan, 1> literal{
+        fi::ByteSpan{literal_begin, literal_begin + marker.size()}};
+    const std::vector<int> mixed_tokens =
+        tokenizer.encode_with_boundaries(mixed, {}, {}, literal).input_ids;
     failures += check(
-        std::count(custom_encoded.input_ids.begin(), custom_encoded.input_ids.end(), 248046) == 1 &&
-            std::none_of(custom_encoded.input_ids.begin(), custom_encoded.input_ids.end(),
-                         [](int id) { return id == 248056 || id == 248057 || id == 248068; }),
-        "tool data or template kwargs were interpreted as controls");
+        !mixed_tokens.empty() && mixed_tokens.front() == 248045 && mixed_tokens.back() == 248046 &&
+            std::find(mixed_tokens.begin(), mixed_tokens.end(), 248056) == mixed_tokens.end(),
+        "literal exclusion suppressed template-owned control tokens");
     return failures;
 }
 
@@ -652,8 +652,8 @@ int test_context_capacity_guard() {
     ninfer::PromptInput input;
     ninfer::ChatMessage message;
     message.role = ninfer::ChatRole::User;
-    message.parts.push_back(ninfer::MessagePart{
-        .kind = ninfer::MessagePartKind::Text, .text = "quoted <|image_pad|>", .media = {}});
+    message.parts.push_back(
+        ninfer::MessagePart{.kind = ninfer::MessagePartKind::Text, .text = "x", .media = {}});
     input.messages.push_back(std::move(message));
 
     const Frontend counting         = make_frontend(resources(), false);
@@ -709,7 +709,105 @@ int test_context_capacity_guard() {
     return failures;
 }
 
-int test_selected_template_instruction_prefix() {
+int test_official_chat_template() {
+    int failures = 0;
+    failures += check(render_chat_text({chat_message(ninfer::ChatRole::User, "hello")}) ==
+                          "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n<think>\n",
+                      "ordinary user prompt differs from the official template");
+
+    fi::ChatRenderOptions no_generation;
+    no_generation.add_generation_prompt = false;
+    failures +=
+        check(render_chat_text({chat_message(ninfer::ChatRole::System, "  be concise  "),
+                                chat_message(ninfer::ChatRole::User, "hello")},
+                               no_generation) == "<|im_start|>system\nbe concise<|im_end|>\n"
+                                                 "<|im_start|>user\nhello<|im_end|>\n",
+              "leading system prompt differs from the official template");
+    failures += check(render_chat_text({chat_message(ninfer::ChatRole::System, ""),
+                                        chat_message(ninfer::ChatRole::User, "hello")},
+                                       no_generation) ==
+                          "<|im_start|>system\n<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n",
+                      "empty leading system prompt differs from the official template");
+
+    fi::ChatMessage tool_assistant = chat_message(ninfer::ChatRole::Assistant, "");
+    tool_assistant.tool_calls.push_back(
+        {.id = "", .name = "f", .arguments_json = R"({"flag":true,"nested":{"x":[1,2]}})"});
+    failures += check(render_chat_text({chat_message(ninfer::ChatRole::User, "hi"), tool_assistant},
+                                       no_generation) ==
+                          "<|im_start|>user\nhi<|im_end|>\n"
+                          "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                          "<tool_call>\n<function=f>\n<parameter=flag>\ntrue\n</parameter>\n"
+                          "<parameter=nested>\n{\"x\": [1, 2]}\n</parameter>\n"
+                          "</function>\n</tool_call><|im_end|>\n",
+                      "nested or boolean tool arguments differ from official JSON rendering");
+
+    fi::ChatMessage preamble   = chat_message(ninfer::ChatRole::Assistant, "Let me check:");
+    preamble.reasoning_content = "I should inspect.";
+    preamble.tool_calls.push_back(
+        {.id = "call_read", .name = "read_file", .arguments_json = R"({"path":"a"})"});
+    failures += check(render_chat_text({chat_message(ninfer::ChatRole::User, "inspect"), preamble},
+                                       no_generation) ==
+                          "<|im_start|>user\ninspect<|im_end|>\n"
+                          "<|im_start|>assistant\n<think>\nI should inspect.\n</think>\n\n"
+                          "Let me check:\n\n<tool_call>\n<function=read_file>\n<parameter=path>\n"
+                          "a\n</parameter>\n</function>\n</tool_call><|im_end|>\n",
+                      "assistant reasoning, preamble and tool call did not share one exact turn");
+
+    fi::ChatRenderOptions no_thinking;
+    no_thinking.enable_thinking = false;
+    failures +=
+        check(render_chat_text({chat_message(ninfer::ChatRole::User, "q1"),
+                                chat_message(ninfer::ChatRole::Assistant,
+                                             "<think>\nold thought\n</think>\n\nold answer"),
+                                chat_message(ninfer::ChatRole::User, "q2")},
+                               no_thinking) == "<|im_start|>user\nq1<|im_end|>\n"
+                                               "<|im_start|>assistant\nold answer<|im_end|>\n"
+                                               "<|im_start|>user\nq2<|im_end|>\n"
+                                               "<|im_start|>assistant\n<think>\n\n</think>\n\n",
+              "thinking history differs from the official template");
+
+    fi::ChatMessage lookup = chat_message(ninfer::ChatRole::Assistant, "");
+    lookup.tool_calls.push_back(
+        {.id = "", .name = "lookup", .arguments_json = R"({"city":"Paris"})"});
+    failures +=
+        check(render_chat_text({chat_message(ninfer::ChatRole::User, "weather?"), lookup,
+                                chat_message(ninfer::ChatRole::Tool, "sunny"),
+                                chat_message(ninfer::ChatRole::Tool, "20C"),
+                                chat_message(ninfer::ChatRole::User, "thanks")},
+                               no_generation) ==
+                  "<|im_start|>user\nweather?<|im_end|>\n"
+                  "<|im_start|>assistant\n<tool_call>\n<function=lookup>\n"
+                  "<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call><|im_end|>\n"
+                  "<|im_start|>user\n<tool_response>\nsunny\n</tool_response>\n"
+                  "<tool_response>\n20C\n</tool_response><|im_end|>\n"
+                  "<|im_start|>user\nthanks<|im_end|>\n",
+              "tool-response grouping differs from the official template");
+
+    fi::ChatRenderOptions tools = no_generation;
+    tools.tool_jsons.push_back(
+        R"({"type":"function","function":{"name":"f","description":"d","parameters":{"type":"object","properties":{"flag":{"type":"boolean"}}}}})");
+    const std::string tools_rendered =
+        render_chat_text({chat_message(ninfer::ChatRole::System, "be exact"),
+                          chat_message(ninfer::ChatRole::User, "hi")},
+                         tools);
+    failures += check(
+        tools_rendered.find("\n{\"type\": \"function\", \"function\": {\"name\": \"f\", "
+                            "\"description\": \"d\", \"parameters\": {\"type\": \"object\", "
+                            "\"properties\": {\"flag\": {\"type\": \"boolean\"}}}}}\n</tools>") !=
+                std::string::npos &&
+            tools_rendered.ends_with(
+                "</IMPORTANT>\n\nbe exact<|im_end|>\n<|im_start|>user\nhi<|im_end|>\n"),
+        "tools system block differs from official tojson rendering");
+
+    failures += check(throws_invalid_argument([&] {
+                          (void)render_chat({chat_message(ninfer::ChatRole::System, "only")},
+                                            no_generation);
+                      }),
+                      "message history without a user query was accepted");
+    return failures;
+}
+
+int test_ordered_instruction_turns() {
     fi::ChatRenderOptions no_generation;
     no_generation.add_generation_prompt = false;
 
@@ -841,18 +939,129 @@ int test_assistant_continuation() {
                                             options);
                       }),
                       "assistant continuation accepted an ambiguous Thinking opener");
-    options.enable_thinking = false;
-    const auto literal      = render_chat(
-        {chat_message(ninfer::ChatRole::User, "question"),
-              chat_message(ninfer::ChatRole::Assistant, "<think>quoted <|im_end|><|image_pad|>")},
-        options);
-    const auto encoded = fi::encode_rendered_chat(fixture_tokenizer(), literal);
+    return failures;
+}
+
+int test_reasoning_effort_chat_template() {
+    constexpr std::string_view low_instructions =
+        "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly "
+        "to the conclusion without unnecessary elaboration.";
+    constexpr std::string_view xhigh_instructions =
+        "Reasoning effort is set to xhigh. Please think carefully through the task, validate key "
+        "assumptions, consider plausible alternatives, and prioritize correctness, consistency, "
+        "and clarity in the final answer.";
+
+    const ninfer::PromptCapabilities toggle_capabilities =
+        thinking_toggle_template().capabilities();
+    const ninfer::PromptCapabilities effort_capabilities =
+        reasoning_effort_template().capabilities();
+    int failures = check(toggle_capabilities.enable_thinking &&
+                             !toggle_capabilities.reasoning_effort.default_effort &&
+                             !toggle_capabilities.reasoning_effort.low &&
+                             !toggle_capabilities.reasoning_effort.medium &&
+                             !toggle_capabilities.reasoning_effort.xhigh,
+                         "thinking-toggle template advertised reasoning effort");
+    failures += check(
+        effort_capabilities.enable_thinking && effort_capabilities.reasoning_effort.low &&
+            effort_capabilities.reasoning_effort.medium &&
+            effort_capabilities.reasoning_effort.xhigh &&
+            effort_capabilities.reasoning_effort.default_effort == ninfer::ReasoningEffort::XHigh,
+        "reasoning-effort template did not advertise its complete capability set");
+
+    const auto render_effort = [](ninfer::ReasoningEffort effort) {
+        fi::ChatRenderOptions options;
+        options.reasoning_effort = effort;
+        return reasoning_effort_template()
+            .render({chat_message(ninfer::ChatRole::User, "hello")}, options)
+            .text;
+    };
+    const std::string tail = "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n<think>\n";
+    failures += check(
+        reasoning_effort_template().render({chat_message(ninfer::ChatRole::User, "hello")}).text ==
+            "<|im_start|>system\n" + std::string(xhigh_instructions) + "<|im_end|>\n" + tail,
+        "reasoning-effort template did not apply its xhigh default");
     failures +=
-        check(!literal.starts_in_reasoning && literal.text.ends_with("<|image_pad|>") &&
-                  std::count(encoded.input_ids.begin(), encoded.input_ids.end(), 248046) == 1 &&
-                  std::none_of(encoded.input_ids.begin(), encoded.input_ids.end(),
-                               [](int id) { return id == 248068 || id == 248056; }),
-              "assistant continuation reinterpreted literal controls");
+        check(render_effort(ninfer::ReasoningEffort::Low) ==
+                  "<|im_start|>system\n" + std::string(low_instructions) + "<|im_end|>\n" + tail,
+              "low reasoning effort did not render the official instruction");
+    failures += check(render_effort(ninfer::ReasoningEffort::Medium) == tail,
+                      "medium reasoning effort injected an instruction");
+
+    fi::ChatRenderOptions disabled;
+    disabled.enable_thinking = false;
+    failures += check(reasoning_effort_template()
+                              .render({chat_message(ninfer::ChatRole::System, ""),
+                                       chat_message(ninfer::ChatRole::User, "hello")},
+                                      disabled)
+                              .text == "<|im_start|>user\nhello<|im_end|>\n"
+                                       "<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                      "disabled thinking did not suppress effort and an empty system turn");
+    disabled.reasoning_effort = ninfer::ReasoningEffort::Low;
+    failures += check(throws_invalid_argument([&] {
+                          (void)reasoning_effort_template().render(
+                              {chat_message(ninfer::ChatRole::User, "hello")}, disabled);
+                      }),
+                      "reasoning effort and disabled thinking were accepted together");
+
+    fi::ChatRenderOptions v225_off;
+    v225_off.enable_thinking = false;
+    failures += check(froggeric_v225_template()
+                                  .render({chat_message(ninfer::ChatRole::System, ""),
+                                           chat_message(ninfer::ChatRole::User, "hello")},
+                                          v225_off)
+                                  .text ==
+                              "<|im_start|>user\nhello<|im_end|>\n"
+                              "<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                      "froggeric v22.5 template did not disable thinking on request");
+
+    fi::ChatRenderOptions unsupported;
+    unsupported.reasoning_effort = ninfer::ReasoningEffort::Low;
+    failures += check(throws_invalid_argument([&] {
+                          (void)thinking_toggle_template().render(
+                              {chat_message(ninfer::ChatRole::User, "hello")}, unsupported);
+                      }),
+                      "thinking-toggle template accepted reasoning effort");
+
+    fi::ChatMessage previous   = chat_message(ninfer::ChatRole::Assistant, "old answer");
+    previous.reasoning_content = "old thought";
+    fi::ChatRenderOptions no_generation;
+    no_generation.add_generation_prompt = false;
+    no_generation.reasoning_effort      = ninfer::ReasoningEffort::Medium;
+    const std::string preserved         = reasoning_effort_template()
+                                      .render({chat_message(ninfer::ChatRole::User, "q1"), previous,
+                                               chat_message(ninfer::ChatRole::User, "q2")},
+                                              no_generation)
+                                      .text;
+    failures += check(
+        preserved.find("<|im_start|>assistant\n<think>\nold thought\n</think>\n\nold answer") !=
+            std::string::npos,
+        "reasoning-effort template did not preserve prior thinking by default");
+    no_generation.preserve_thinking = false;
+    failures += check(reasoning_effort_template()
+                              .render({chat_message(ninfer::ChatRole::User, "q1"), previous,
+                                       chat_message(ninfer::ChatRole::User, "q2")},
+                                      no_generation)
+                              .text.find("old thought") == std::string::npos,
+                      "explicit preserve_thinking=false did not remove prior thinking");
+
+    fi::ChatMessage empty_arguments = chat_message(ninfer::ChatRole::Assistant, "");
+    empty_arguments.tool_calls.push_back({.id = "", .name = "f", .arguments_json = ""});
+    failures += check(
+        reasoning_effort_template()
+            .render({chat_message(ninfer::ChatRole::User, "call"), empty_arguments}, no_generation)
+            .text.ends_with("<tool_call>\n<function=f>\n</function>\n"
+                            "</tool_call><|im_end|>\n"),
+        "empty tool arguments did not follow the reasoning-effort template");
+
+    const ninfer::PromptCapabilities v225_capabilities =
+        froggeric_v225_template().capabilities();
+    failures += check(v225_capabilities.enable_thinking &&
+                          v225_capabilities.reasoning_effort.low &&
+                          v225_capabilities.reasoning_effort.medium &&
+                          v225_capabilities.reasoning_effort.xhigh &&
+                          v225_capabilities.reasoning_effort.default_effort ==
+                              ninfer::ReasoningEffort::XHigh,
+                      "froggeric v22.5 template did not advertise reasoning-effort capabilities");
     return failures;
 }
 
@@ -953,27 +1162,6 @@ int test_rewrite_checkpoint_trace() {
     return failures;
 }
 
-int test_selected_template_recovery_boundary() {
-    auto assistant              = chat_message(ninfer::ChatRole::Assistant, "answer");
-    assistant.reasoning_content = "retained reasoning";
-    const std::vector<std::vector<fi::ChatMessage>> histories{
-        {chat_message(ninfer::ChatRole::User, "question"), assistant,
-         chat_message(ninfer::ChatRole::Tool, "result")},
-        {chat_message(ninfer::ChatRole::Tool, "imported result"), assistant}};
-    int failures = 0;
-    for (const auto& history : histories) {
-        const auto qwen36 = thinking_toggle_template().render(history);
-        const auto qwen38 =
-            fi::CompiledChatTemplate::resolve(reasoning_effort_template_source()).render(history);
-        failures += check(
-            qwen36.rewrite_checkpoint && qwen38.rewrite_checkpoint &&
-                qwen36.rewrite_checkpoint->offset == qwen36.text.find("<|im_start|>assistant\n") &&
-                qwen38.rewrite_checkpoint->offset == qwen38.text.rfind("<|im_start|>assistant\n"),
-            "recovery candidates ignored the selected template's default history policy");
-    }
-    return failures;
-}
-
 int test_adjacent_tool_message_boundary() {
     fi::ChatMessage assistant = chat_message(ninfer::ChatRole::Assistant, "");
     assistant.tool_calls.push_back(
@@ -990,33 +1178,6 @@ int test_adjacent_tool_message_boundary() {
                  "adjacent Tool messages lost their exact intermediate message boundary");
 }
 
-int test_literal_cache_boundary() {
-    const auto compiled = fi::CompiledChatTemplate::resolve(
-        "{{ '<think>' if messages|length == 1 else messages[0].content }}"
-        "{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}");
-    fi::ChatRenderOptions options;
-    options.cache_markers.push_back({.after_message_count = 1});
-    const auto rendered = compiled.render({chat_message(ninfer::ChatRole::User, "<think>"),
-                                           chat_message(ninfer::ChatRole::User, "next")},
-                                          options);
-    int failures = check(rendered.cache_boundaries.size() == 1 && !rendered.cache_boundaries[0],
-                         "text equality published a cache boundary with different token meaning");
-    options      = {};
-    options.add_generation_prompt = false;
-    const std::vector<fi::ChatMessage> history{
-        chat_message(ninfer::ChatRole::User, "quoted <|image_pad|> <|im_end|>")};
-    auto next = history;
-    next.push_back(chat_message(ninfer::ChatRole::Developer, "new diagnostics"));
-    const auto before =
-        fi::encode_rendered_chat(fixture_tokenizer(), render_chat(history, options));
-    const auto after = fi::encode_rendered_chat(fixture_tokenizer(), render_chat(next, options));
-    failures += check(
-        after.input_ids.size() > before.input_ids.size() &&
-            std::equal(before.input_ids.begin(), before.input_ids.end(), after.input_ids.begin()),
-        "appending diagnostics changed the token prefix of quoted message content");
-    return failures;
-}
-
 int test_official_resource_guards() {
     FrontendResources stale_pad     = resources();
     nlohmann::json tokenizer_config = nlohmann::json::parse(stale_pad.tokenizer_config_json);
@@ -1029,90 +1190,22 @@ int test_official_resource_guards() {
     nlohmann::json mismatched_config   = nlohmann::json::parse(mismatched.tokenizer_config_json);
     mismatched_config["chat_template"] = reasoning_effort_template_source();
     mismatched.tokenizer_config_json   = mismatched_config.dump();
-    const auto standalone              = make_frontend(mismatched, false);
-    ninfer::PromptInput input;
-    ninfer::ChatMessage message;
-    message.role = ninfer::ChatRole::User;
-    message.parts.push_back({.text = "hello"});
-    input.messages.push_back(std::move(message));
-    failures += check(standalone.prepare(input).summary().starts_in_reasoning,
-                      "tokenizer_config template copy overrode the standalone resource");
-    const auto custom   = make_frontend(resources("{{ messages[0].content }}"), false);
-    const auto prepared = custom.prepare(input);
-    failures += check(!prepared.summary().starts_in_reasoning &&
-                          FrontendFactory::inspect(prepared).token_ids ==
-                              fixture_tokenizer().encode("hello"),
-                      "custom template source was not executed");
+    failures += check(throws_invalid_argument([&] { (void)make_frontend(mismatched); }),
+                      "different standalone and tokenizer-config chat templates were accepted");
 
-    return failures;
-}
+    FrontendResources unknown = resources("{{ messages }}");
+    failures += check(throws_invalid_argument([&] { (void)make_frontend(unknown); }),
+                      "unknown chat template was accepted");
 
-int test_template_file_execution() {
-    struct Temporary {
-        std::filesystem::path path =
-            std::filesystem::temp_directory_path() /
-            ("ninfer-chat-template-" +
-             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
-             ".jinja");
+    const Frontend effort_frontend =
+        make_frontend(resources(reasoning_effort_template_source()), false);
+    const ninfer::PromptCapabilities capabilities = effort_frontend.prompt_capabilities();
+    failures +=
+        check(capabilities.reasoning_effort.low && capabilities.reasoning_effort.medium &&
+                  capabilities.reasoning_effort.xhigh &&
+                  capabilities.reasoning_effort.default_effort == ninfer::ReasoningEffort::XHigh,
+              "Frontend did not expose capabilities from its loaded chat template");
 
-        ~Temporary() {
-            std::error_code error;
-            std::filesystem::remove(path, error);
-        }
-    } file;
-
-    const std::string source = "{% for m in messages %}{{ m.role }}:{{ m.content }}|{% endfor %}"
-                               "{{ style|default('plain') }}/{{ extra is none }}"
-                               "{{ '<|im_start|>assistant\\n' }}";
-    {
-        std::ofstream stream(file.path);
-        stream << source;
-    }
-    ninfer::models::qwen3_5::FrontendOptions options;
-    options.vision_enabled     = false;
-    options.chat_template_path = file.path;
-    const auto overridden      = make_frontend(resources("{{ messages[0].content }}"), options);
-    {
-        std::ofstream stream(file.path);
-        stream << "changed after startup";
-    }
-    ninfer::PromptInput input;
-    for (const auto role :
-         {ninfer::ChatRole::User, ninfer::ChatRole::System, ninfer::ChatRole::Developer}) {
-        ninfer::ChatMessage message;
-        message.role = role;
-        message.parts.push_back({.text = "text"});
-        input.messages.push_back(std::move(message));
-    }
-    input.options.enable_thinking           = true;
-    input.options.chat_template_kwargs_json = R"({"style":"custom","extra":null})";
-    const auto prepared                     = overridden.prepare(input);
-    const auto expected                     = fixture_tokenizer().encode(
-        "user:text|system:text|developer:text|custom/True<|im_start|>assistant\n");
-    int failures = check(
-        FrontendFactory::inspect(prepared).token_ids == expected &&
-            !prepared.summary().starts_in_reasoning &&
-            overridden.count_tokens(input) == expected.size(),
-        "external source, ordered roles, kwargs, or rendered thinking state were not respected");
-    const auto embedded = make_frontend(resources(source), false);
-    const auto same     = embedded.prepare(input);
-    failures += check(FrontendFactory::inspect(same).token_ids == expected,
-                      "embedded and external copies of the same template rendered differently");
-    const auto rejects_system = make_frontend(
-        resources("{% for m in messages %}{% if m.role == 'system' %}{{ raise_exception('template "
-                  "declines system') }}{% endif %}{% endfor %}ok"),
-        false);
-    failures += check(throws_invalid_argument([&] { (void)rejects_system.prepare(input); }),
-                      "engine replaced a template's own role rule");
-    input.options.chat_template_kwargs_json = R"({"messages":[]})";
-    failures += check(throws_invalid_argument([&] { (void)overridden.prepare(input); }),
-                      "template kwargs overwrote engine-owned messages");
-    {
-        std::ofstream stream(file.path);
-        stream << "{% if %}";
-    }
-    failures += check(throws_invalid_argument([&] { (void)make_frontend(resources(), options); }),
-                      "malformed external template passed startup parsing");
     return failures;
 }
 
@@ -1145,30 +1238,18 @@ int test_text_and_image_prepare(const Frontend& frontend) {
     text_input.messages.push_back(std::move(text_message));
     auto text             = frontend.prepare(std::move(text_input));
     const auto& text_data = FrontendFactory::inspect(text);
-    const std::vector<ninfer::TokenId> expected{248045,
-                                                fixture_byte_token('u'),
-                                                fixture_byte_token('s'),
-                                                fixture_byte_token('e'),
-                                                fixture_byte_token('r'),
-                                                32,
-                                                0,
-                                                248046,
-                                                32,
-                                                248045,
-                                                31,
-                                                248068,
-                                                32};
+    const std::vector<ninfer::TokenId> expected{248045, 30, 0, 248046, 32, 248045, 31, 248068, 32};
     int failures =
         check(text_data.token_ids == expected, "text frontend did not render/tokenize chat");
     failures += check(text_data.identity.rewrite_checkpoint &&
                           text_data.identity.rewrite_checkpoint->kind ==
                               ninfer::models::qwen3_5::RewriteCheckpointKind::TurnClosure &&
-                          text_data.identity.rewrite_checkpoint->frontier == 9 &&
+                          text_data.identity.rewrite_checkpoint->frontier == 5 &&
                           text_data.starts_in_reasoning && !text_data.has_media(),
                       "text frontend did not preserve prefix/thinking identity");
     failures +=
-        check(text_data.position_axis(0).back() == 12 && text_data.position_axis(1).back() == 12 &&
-                  text_data.position_axis(2).back() == 12,
+        check(text_data.position_axis(0).back() == 8 && text_data.position_axis(1).back() == 8 &&
+                  text_data.position_axis(2).back() == 8,
               "text frontend did not construct axis-major positions");
 
     ninfer::ChatMessage preserved_message;
@@ -1183,7 +1264,7 @@ int test_text_and_image_prepare(const Frontend& frontend) {
     failures += check(preserved_data.identity.rewrite_checkpoint &&
                           preserved_data.identity.rewrite_checkpoint->kind ==
                               ninfer::models::qwen3_5::RewriteCheckpointKind::ResponseReplay &&
-                          preserved_data.identity.rewrite_checkpoint->frontier == 9 &&
+                          preserved_data.identity.rewrite_checkpoint->frontier == 5 &&
                           preserved_data.identity.rewrite_checkpoint->frontier <
                               preserved_data.token_ids.size(),
                       "preserve-thinking prompt did not publish a pre-generation response "
@@ -1202,7 +1283,7 @@ int test_text_and_image_prepare(const Frontend& frontend) {
     failures += check(nonthinking_data.identity.rewrite_checkpoint &&
                           nonthinking_data.identity.rewrite_checkpoint->kind ==
                               ninfer::models::qwen3_5::RewriteCheckpointKind::ResponseReplay &&
-                          nonthinking_data.identity.rewrite_checkpoint->frontier == 9 &&
+                          nonthinking_data.identity.rewrite_checkpoint->frontier == 5 &&
                           nonthinking_data.identity.rewrite_checkpoint->frontier <
                               nonthinking_data.token_ids.size() &&
                           !nonthinking_data.starts_in_reasoning,
@@ -1284,38 +1365,143 @@ int test_text_and_image_prepare(const Frontend& frontend) {
     return failures;
 }
 
-int test_template_media_contract() {
-    int failures = 0;
-    for (const char* source : {"<|image_pad|>", "<|vision_start|><|image_pad|><|vision_end|>"}) {
-        failures += check(throws_invalid_argument([&] {
-                              (void)fi::CompiledChatTemplate::resolve(source).render(
-                                  {chat_message(ninfer::ChatRole::User, "hello")});
-                          }),
-                          "invalid template-authored media controls were accepted");
+int test_literal_control_tokens_with_media() {
+    fi::ChatRenderOptions no_generation;
+    no_generation.add_generation_prompt = false;
+    const fi::RenderedChat literal_rendered =
+        render_chat({chat_message(ninfer::ChatRole::User, "quoted <|image_pad|>")}, no_generation);
+    const std::vector<int> literal_tokens =
+        fi::encode_rendered_chat(fixture_tokenizer(), literal_rendered).input_ids;
+    int failures = check(
+        literal_rendered.text == "<|im_start|>user\nquoted <|image_pad|><|im_end|>\n" &&
+            literal_rendered.text.find("\xE2\x81\xA0") == std::string::npos &&
+            std::find(literal_tokens.begin(), literal_tokens.end(), 248056) == literal_tokens.end(),
+        "renderer changed or structurally tokenized a literal Vision marker");
+
+    fi::ChatMessage leading_tool;
+    leading_tool.role = ninfer::ChatRole::Tool;
+    leading_tool.parts.push_back(
+        fi::ChatPart{.kind = fi::ChatPartKind::Text, .text = "imported result"});
+    const fi::RenderedChat leading_tool_rendered = render_chat({leading_tool}, no_generation);
+    failures += check(
+        leading_tool_rendered.text ==
+            "<|im_start|>user\n<tool_response>\nimported result\n</tool_response><|im_end|>\n",
+        "leading tool result was rendered without its user-role envelope");
+
+    const Frontend frontend = make_frontend(resources());
+
+    auto text_part = [](std::string text) {
+        return ninfer::MessagePart{
+            .kind = ninfer::MessagePartKind::Text, .text = std::move(text), .media = {}};
+    };
+    auto image_part = [](std::vector<std::uint8_t> bytes, std::string source_name) {
+        ninfer::MessagePart image;
+        image.kind              = ninfer::MessagePartKind::Media;
+        image.media.kind        = ninfer::MediaKind::Image;
+        image.media.bytes       = std::move(bytes);
+        image.media.media_type  = "image/x-portable-pixmap";
+        image.media.source_name = std::move(source_name);
+        return image;
+    };
+
+    std::vector<std::uint8_t> result_b_bytes  = gradient_ppm();
+    std::vector<std::uint8_t> result_a1_bytes = result_b_bytes;
+    std::vector<std::uint8_t> result_a2_bytes = result_b_bytes;
+    result_a1_bytes.back() ^= 0x01U;
+    result_a2_bytes.back() ^= 0x02U;
+    const fi::Sha256Digest result_b_digest =
+        fi::sha256(std::span<const std::uint8_t>(result_b_bytes));
+    const fi::Sha256Digest result_a1_digest =
+        fi::sha256(std::span<const std::uint8_t>(result_a1_bytes));
+    const fi::Sha256Digest result_a2_digest =
+        fi::sha256(std::span<const std::uint8_t>(result_a2_bytes));
+
+    ninfer::ChatMessage system;
+    system.role = ninfer::ChatRole::System;
+    system.parts.push_back(
+        text_part("The quoted template contains <|video_pad|>, <|vision_start|>, "
+                  "<|image_pad|>, and <|vision_end|>."));
+
+    ninfer::ChatMessage user;
+    user.role = ninfer::ChatRole::User;
+    user.parts.push_back(text_part("inspect both files"));
+
+    ninfer::ChatMessage assistant;
+    assistant.role              = ninfer::ChatRole::Assistant;
+    assistant.reasoning_content = "quoted reasoning <|video_pad|>";
+    assistant.tool_calls.push_back(ninfer::ToolCall{
+        .id             = "call_A",
+        .name           = "read",
+        .arguments_json = R"({"path":"quoted <|image_pad|>.png"})",
+    });
+    assistant.tool_calls.push_back(
+        ninfer::ToolCall{.id = "call_B", .name = "read", .arguments_json = R"({"path":"b.png"})"});
+
+    ninfer::ChatMessage result_b;
+    result_b.role         = ninfer::ChatRole::Tool;
+    result_b.tool_call_id = "call_B";
+    result_b.parts.push_back(text_part("result B: literal <|image_"));
+    result_b.parts.push_back(text_part("pad|> then image "));
+    result_b.parts.push_back(image_part(std::move(result_b_bytes), "result-b.ppm"));
+
+    ninfer::ChatMessage result_a;
+    result_a.role         = ninfer::ChatRole::Tool;
+    result_a.tool_call_id = "call_A";
+    result_a.parts.push_back(text_part("result A first image "));
+    result_a.parts.push_back(image_part(std::move(result_a1_bytes), "result-a1.ppm"));
+    result_a.parts.push_back(text_part(" literal <|vision_start|> between images "));
+    result_a.parts.push_back(image_part(std::move(result_a2_bytes), "result-a2.ppm"));
+
+    ninfer::PromptInput input;
+    input.messages.push_back(std::move(system));
+    input.messages.push_back(std::move(user));
+    input.messages.push_back(std::move(assistant));
+    input.messages.push_back(std::move(result_b));
+    input.messages.push_back(std::move(result_a));
+    input.options.tool_jsons.push_back(
+        R"({"type":"function","function":{"name":"read","description":"quoted <|vision_start|><|image_pad|><|vision_end|> and <|video_pad|>","parameters":{"type":"object"}}})");
+    input.context_cache.markers.push_back(ninfer::PromptCacheMarker{
+        .after_message_count = static_cast<std::uint32_t>(input.messages.size()),
+        .kind                = ninfer::PromptCacheMarkerKind::PrivateLongAnchor,
+    });
+
+    const std::uint32_t counted = frontend.count_tokens(input);
+    const auto prepared         = frontend.prepare(std::move(input));
+    const auto& data            = FrontendFactory::inspect(prepared);
+    failures += check(data.token_ids.size() == counted,
+                      "literal controls changed token-counting semantics");
+    failures += check(data.vision_items.size() == 3 && data.media_payloads.size() == 3,
+                      "literal controls changed the typed media count");
+    const auto private_anchor = std::find_if(
+        data.context_cache.opportunities.begin(), data.context_cache.opportunities.end(),
+        [](const auto& opportunity) {
+            return opportunity.kind == ninfer::PromptCacheMarkerKind::PrivateLongAnchor;
+        });
+    failures += check(private_anchor != data.context_cache.opportunities.end(),
+                      "literal controls lost the following cache boundary");
+    if (data.vision_items.size() == 3) {
+        const auto& b  = data.vision_items[0];
+        const auto& a1 = data.vision_items[1];
+        const auto& a2 = data.vision_items[2];
+        failures += check(
+            b.content_digest == result_b_digest && a1.content_digest == result_a1_digest &&
+                a2.content_digest == result_a2_digest && b.token_spans.size() == 1 &&
+                a1.token_spans.size() == 1 && a2.token_spans.size() == 1 &&
+                b.token_spans[0].count == 4 && a1.token_spans[0].count == 4 &&
+                a2.token_spans[0].count == 4 && b.token_spans[0].begin < a1.token_spans[0].begin &&
+                a1.token_spans[0].begin < a2.token_spans[0].begin,
+            "parallel tool-result media lost request or nested-content order");
+        if (private_anchor != data.context_cache.opportunities.end()) {
+            failures +=
+                check(private_anchor->frontier >= a2.token_spans[0].begin + a2.token_spans[0].count,
+                      "media provenance broke the following cache boundary");
+        }
     }
-    const auto missing =
-        make_frontend(resources("{% for m in messages %}{{ m.role }}{% endfor %}"));
-    failures += check(throws_invalid_argument([&] { (void)missing.prepare(image_input()); }),
-                      "a template that omits an input image was accepted");
-    const auto wrong_type = make_frontend(resources("<|vision_start|><|video_pad|><|vision_end|>"));
-    failures += check(throws_invalid_argument([&] { (void)wrong_type.prepare(image_input()); }),
-                      "template media type mismatch was accepted");
-    const auto frontend = make_frontend(resources());
-    auto input          = image_input();
-    const ninfer::MessagePart quoted{
-        .text = "quoted <|vision_start|><|image_pad|><|vision_end|> <|video_pad|>"};
-    input.messages.front().parts.insert(input.messages.front().parts.begin(), quoted);
-    input.messages.front().parts.push_back(quoted);
-    const auto prepared = frontend.prepare(input);
-    const auto& data    = FrontendFactory::inspect(prepared);
-    failures +=
-        check(data.vision_items.size() == 1 && data.prepare.vision_tokens == 4 &&
-                  std::count(data.token_ids.begin(), data.token_ids.end(), 248056) == 4 &&
-                  std::count(data.token_ids.begin(), data.token_ids.end(), 248053) == 1 &&
-                  std::count(data.token_ids.begin(), data.token_ids.end(), 248054) == 1 &&
-                  std::count(data.token_ids.begin(), data.token_ids.end(), 248057) == 0 &&
-                  frontend.count_tokens(input) == data.token_ids.size(),
-              "literal media markers interfered with real image expansion or token counting");
+    failures += check(std::count(data.token_ids.begin(), data.token_ids.end(), 248056) == 12 &&
+                          std::count(data.token_ids.begin(), data.token_ids.end(), 248057) == 0 &&
+                          std::count(data.token_ids.begin(), data.token_ids.end(), 248053) == 3 &&
+                          std::count(data.token_ids.begin(), data.token_ids.end(), 248054) == 3,
+                      "literal Vision spellings became media tokens");
     return failures;
 }
 
@@ -2155,6 +2341,29 @@ int test_media_preparation_cancellation() {
     return check(false, "cancelled media preparation completed successfully");
 }
 
+int test_chat_template_file_override() {
+    static const std::filesystem::path kFixturePath =
+        NINFER_SOURCE_DIR "/tests/fixtures/frontend/reasoning_effort_froggeric_v225_chat_template.jinja";
+    ninfer::models::qwen3_5::FrontendOptions options;
+    options.max_context          = std::numeric_limits<std::uint32_t>::max();
+    options.chat_template_path   = kFixturePath;
+    const Frontend overridden    = make_frontend(resources(), options);
+    const ninfer::PromptCapabilities capabilities = overridden.prompt_capabilities();
+    int failures = check(capabilities.reasoning_effort.low &&
+                             capabilities.reasoning_effort.medium &&
+                             capabilities.reasoning_effort.xhigh &&
+                             capabilities.reasoning_effort.default_effort ==
+                                 ninfer::ReasoningEffort::XHigh,
+                         "chat-template override did not reach prompt capabilities");
+    failures += check(throws_invalid_argument([&] {
+                      ninfer::models::qwen3_5::FrontendOptions missing           = options;
+                      missing.chat_template_path        = "/ninfer-nonexistent-chat-template.jinja";
+                      (void)make_frontend(resources(), missing);
+                  }),
+                  "unreadable chat-template override was accepted");
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -2165,22 +2374,22 @@ int main() {
     failures += test_tokenizer_config_merge();
     failures += test_bpe_merge_order();
     failures += test_boundary_aware_tokenization();
-    failures += test_rendered_special_tokens();
+    failures += test_literal_added_token_provenance();
     failures += test_repeated_special_tokens_scan_linearly();
     failures += test_bounded_tokenizer_prefix();
     failures += test_context_capacity_guard();
-    failures += test_selected_template_instruction_prefix();
+    failures += test_official_chat_template();
+    failures += test_ordered_instruction_turns();
     failures += test_assistant_continuation();
+    failures += test_reasoning_effort_chat_template();
+    failures += test_chat_template_file_override();
     failures += test_rewrite_checkpoint_trace();
     failures += test_adjacent_tool_message_boundary();
-    failures += test_literal_cache_boundary();
-    failures += test_selected_template_recovery_boundary();
     failures += test_official_resource_guards();
-    failures += test_template_file_execution();
     failures += test_invalid_public_part_enums(frontend);
     failures += test_text_and_image_prepare(frontend);
     failures += test_media_token_ids_come_from_tokenizer();
-    failures += test_template_media_contract();
+    failures += test_literal_control_tokens_with_media();
     failures += test_image_resize_rejection_policy();
     failures += test_explicit_leading_instruction_cache_boundary();
     failures += test_media_admission_uses_aggregate_resources(frontend);

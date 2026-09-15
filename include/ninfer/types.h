@@ -150,6 +150,8 @@ struct ContextCostOptions {
 
 struct EngineOptions {
     std::filesystem::path artifact_path;
+    // Optional startup replacement for the artifact's frontend/chat_template.jinja.
+    // The source must resolve to a template semantics the target accepts.
     std::filesystem::path chat_template_path;
     EnginePurpose purpose              = EnginePurpose::Generation;
     int device                         = 0;
@@ -368,34 +370,34 @@ struct ChatMessage {
 };
 
 enum class ReasoningEffort : std::uint8_t {
-    None,
-    Minimal,
     Low,
     Medium,
-    High,
     XHigh,
-    Max,
 };
 
-[[nodiscard]] constexpr std::string_view reasoning_effort_name(ReasoningEffort effort) noexcept {
-    switch (effort) {
-    case ReasoningEffort::None:
-        return "none";
-    case ReasoningEffort::Minimal:
-        return "minimal";
-    case ReasoningEffort::Low:
-        return "low";
-    case ReasoningEffort::Medium:
-        return "medium";
-    case ReasoningEffort::High:
-        return "high";
-    case ReasoningEffort::XHigh:
-        return "xhigh";
-    case ReasoningEffort::Max:
-        return "max";
+struct ReasoningEffortCapabilities {
+    bool low    = false;
+    bool medium = false;
+    bool xhigh  = false;
+    std::optional<ReasoningEffort> default_effort;
+
+    [[nodiscard]] constexpr bool supports(ReasoningEffort effort) const noexcept {
+        switch (effort) {
+        case ReasoningEffort::Low:
+            return low;
+        case ReasoningEffort::Medium:
+            return medium;
+        case ReasoningEffort::XHigh:
+            return xhigh;
+        }
+        return false;
     }
-    return {};
-}
+};
+
+struct PromptCapabilities {
+    bool enable_thinking = false;
+    ReasoningEffortCapabilities reasoning_effort;
+};
 
 enum class PromptContinuationMode : std::uint8_t {
     NewAssistantTurn,
@@ -404,12 +406,10 @@ enum class PromptContinuationMode : std::uint8_t {
 
 struct PromptOptions {
     PromptContinuationMode continuation = PromptContinuationMode::NewAssistantTurn;
-    std::optional<bool> enable_thinking;
+    bool enable_thinking                = true;
     std::optional<ReasoningEffort> reasoning_effort;
-    std::optional<bool> preserve_thinking;
-    // JSON object of template parameters. Unset typed fields leave template defaults intact.
-    std::string chat_template_kwargs_json;
-    bool add_vision_id = false;
+    bool preserve_thinking = false;
+    bool add_vision_id     = false;
     std::vector<std::string> tool_jsons;
 };
 
@@ -514,7 +514,6 @@ private:
 };
 
 struct PromptSummary {
-    bool starts_in_reasoning    = false;
     std::uint32_t prompt_tokens = 0;
     bool has_media              = false;
 };

@@ -19,11 +19,13 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
 #include <limits>
 #include <fstream>
 #include <memory>
 #include <optional>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -228,6 +230,38 @@ fi::CompiledChatTemplate compile_chat_template(const FrontendResources& resource
         }
     }
     return fi::CompiledChatTemplate::resolve(source, std::move(name), std::move(tokens));
+}
+
+// Replaces the artifact chat template with an operator-provided source and keeps
+// tokenizer_config.json.chat_template byte-consistent with it, so the existing
+// validation and template-resolution gates run against the override unchanged.
+void apply_chat_template_override(FrontendResources& resources,
+                                  const std::filesystem::path& chat_template_path) {
+    std::ifstream stream(chat_template_path, std::ios::binary);
+    if (!stream) {
+        throw std::invalid_argument("chat template file is not readable: " +
+                                    chat_template_path.string());
+    }
+    std::ostringstream buffer;
+    buffer << stream.rdbuf();
+    std::string source = buffer.str();
+    if (source.size() > (10U << 20)) {
+        throw std::invalid_argument("chat template file exceeds 10 MiB: " +
+                                    chat_template_path.string());
+    }
+    // A single trailing newline is not template content: the jinja source parser
+    // drops it, and the acceptance digest is defined over the content without it.
+    if (!source.empty() && source.back() == '\n') { source.pop_back(); }
+    resources.chat_template_jinja = std::move(source);
+    Json tokenizer_config =
+        parse_resource_json(resources.tokenizer_config_json, "tokenizer_config.json");
+    tokenizer_config["chat_template"] = resources.chat_template_jinja;
+    try {
+        resources.tokenizer_config_json = tokenizer_config.dump();
+    } catch (const nlohmann::json::exception&) {
+        throw std::invalid_argument("chat template file is not valid UTF-8 text: " +
+                                    chat_template_path.string());
+    }
 }
 
 [[noreturn]] void throw_processor_error(const fi::ProcessorError& error) {
@@ -695,6 +729,11 @@ const ModelSamplingDefaults& Frontend::sampling_defaults() const noexcept {
 }
 
 Frontend make_frontend(const FrontendResources& resources, FrontendOptions options) {
+    if (!options.chat_template_path.empty()) {
+        FrontendResources overridden = resources;
+        apply_chat_template_override(overridden, options.chat_template_path);
+        return Frontend(std::make_shared<const Frontend::Impl>(overridden, options));
+    }
     return Frontend(std::make_shared<const Frontend::Impl>(resources, options));
 }
 

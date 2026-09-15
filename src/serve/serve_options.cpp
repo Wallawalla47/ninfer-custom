@@ -76,7 +76,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--device-state-slots N] [--host-state-slots N] [--host-kv-mib N] "
            "[--max-private-continuations N] [--max-shared-prefixes N] "
            "[--max-long-anchors-per-continuation N] "
-           "[--request-log-jsonl FILE] "
+           "[--chat-template FILE] [--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
@@ -96,6 +96,8 @@ std::string serve_usage_text(const char* argv0) {
            "       --media-preprocess-threads defaults to 0 (auto, at most 16 workers)\n"
            "       --request-log-jsonl appends full-precision server/request records\n"
            "       --model-id overrides the artifact metadata.name reported by the server\n"
+           "       --chat-template replaces the artifact frontend chat template at startup; "
+           "the source must resolve to a template the target accepts\n"
            "       Responses state is process-local and bounded to 1024 records / 256 MiB by "
            "default\n"
            "       --log-stats-interval-ms defaults to 5000; 0 disables periodic throughput logs\n"
@@ -155,6 +157,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.model_id_override = require_value("--model-id");
             if (options.model_id_override->empty()) {
                 throw std::invalid_argument("--model-id must not be empty");
+            }
+        } else if (arg == "--chat-template") {
+            options.chat_template_path = require_value("--chat-template");
+            if (options.chat_template_path.empty()) {
+                throw std::invalid_argument("--chat-template must not be empty");
             }
         } else if (arg == "--max-context") {
             options.max_context = static_cast<std::uint32_t>(
