@@ -61,6 +61,32 @@ int main() {
                           dflash_vision.speculative.backend == ninfer::SpeculativeBackend::DFlash &&
                           dflash_vision.speculative.draft_tokens == 7,
                       "CLI did not preserve the combined DFlash and Vision startup features");
+    const ninfer::cli::Options overlay =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--vision",
+               "--vision-residency", "overlay", "--vision-max-merged", "512"});
+    failures += check(overlay.enable_vision &&
+                          overlay.vision_residency == ninfer::VisionResidency::Overlay,
+                      "--vision-residency overlay did not reach CLI options");
+    failures += check(overlay.vision_max_merged_tokens == 512,
+                      "--vision-max-merged did not preserve its value");
+    failures += check(
+        ninfer::cli::usage_text("ninfer-cli").find("--vision-residency") != std::string::npos,
+        "CLI help omits --vision-residency");
+    failures += check(rejects([] {
+                          (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                       "--vision-residency", "pinned"});
+                      }),
+                      "--vision-residency accepted an unknown mode");
+    failures += check(rejects([] {
+                          (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                       "--vision-max-merged", "33"});
+                      }),
+                      "--vision-max-merged below 64 was accepted");
+    failures += check(rejects([] {
+                          (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                       "--vision-max-merged", "40000"});
+                      }),
+                      "--vision-max-merged above 32768 was accepted");
     for (const auto k : {1U, 2U, 7U, 15U}) {
         const auto dflash2 = parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--spec",
                                     "dflash2", "--draft-tokens", std::to_string(k)});

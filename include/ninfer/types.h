@@ -63,6 +63,11 @@ struct KvCapacityPolicy {
     }
 };
 
+enum class VisionResidency : std::uint8_t {
+    Resident,
+    Overlay,
+};
+
 enum class ProposalHead : std::uint8_t {
     Full,
     Optimized,
@@ -168,6 +173,12 @@ struct EngineOptions {
     // Zero selects a bounded worker count from the detected host concurrency.
     std::uint32_t media_preprocess_threads = 0;
     bool enable_vision                     = false;
+    // Resident keeps the vision tower in device memory with the text weights.
+    // Overlay keeps it in a pinned host block and streams it through borrowed
+    // evictable device staging per prefill window.
+    VisionResidency vision_residency       = VisionResidency::Resident;
+    // Upper bound on merged tokens per vision item; zero leaves the compiled limit.
+    std::uint32_t vision_max_merged_tokens = 32768;
     bool use_cuda_graph                    = true;
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
@@ -650,6 +661,13 @@ struct GenerationTimings {
     double prompt_wall_seconds     = 0.0;
     double generation_wall_seconds = 0.0;
     double total_seconds           = 0.0;
+    // Overlay vision residency: duration and traffic of the encode window that
+    // streamed the vision tower through borrowed device memory.
+    double overlay_window_seconds  = 0.0;
+    double overlay_evict_seconds   = 0.0;
+    double overlay_restore_seconds = 0.0;
+    std::uint64_t overlay_evicted_bytes = 0;
+    std::uint64_t overlay_staged_bytes  = 0;
 };
 
 // Wall elapsed time directly observed in Engine-owned regions. "Exposed" values are latency

@@ -33,6 +33,10 @@ int main() {
     failures +=
         check(!defaults.preserve_thinking, "thinking history is unexpectedly preserved by default");
     failures += check(!defaults.enable_vision, "Vision is not disabled by default");
+    failures += check(defaults.vision_residency == ninfer::VisionResidency::Resident,
+                      "Vision residency is not resident by default");
+    failures += check(defaults.vision_max_merged_tokens == 32768,
+                      "merged Vision token default mismatch");
     failures += check(defaults.request_log_jsonl.empty(),
                       "request JSONL logging is not disabled by default");
     failures += check(defaults.context_cost_presets.empty(),
@@ -133,6 +137,36 @@ int main() {
                           dflash_vision.speculative.backend == ninfer::SpeculativeBackend::DFlash &&
                           dflash_vision.speculative.draft_tokens == 15,
                       "serve options did not preserve combined DFlash and Vision features");
+
+    const ServeOptions overlay =
+        parse({"ninfer-serve", "model.ninfer", "--vision", "--vision-residency", "overlay",
+               "--vision-max-merged", "512"});
+    failures += check(overlay.enable_vision &&
+                          overlay.vision_residency == ninfer::VisionResidency::Overlay,
+                      "--vision-residency overlay did not reach serving options");
+    failures += check(overlay.vision_max_merged_tokens == 512,
+                      "--vision-max-merged did not preserve its value");
+    bool overlay_without_vision_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--vision-residency", "overlay"});
+    } catch (const std::invalid_argument&) { overlay_without_vision_rejected = true; }
+    failures += check(overlay_without_vision_rejected,
+                      "--vision-residency overlay without --vision was accepted");
+    bool bad_residency_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--vision", "--vision-residency", "pinned"});
+    } catch (const std::invalid_argument&) { bad_residency_rejected = true; }
+    failures += check(bad_residency_rejected, "--vision-residency accepted an unknown mode");
+    bool low_merged_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--vision-max-merged", "33"});
+    } catch (const std::invalid_argument&) { low_merged_rejected = true; }
+    failures += check(low_merged_rejected, "--vision-max-merged below 64 was accepted");
+    bool high_merged_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--vision-max-merged", "40000"});
+    } catch (const std::invalid_argument&) { high_merged_rejected = true; }
+    failures += check(high_merged_rejected, "--vision-max-merged above 32768 was accepted");
 
     bool implicit_backend_rejected = false;
     try {

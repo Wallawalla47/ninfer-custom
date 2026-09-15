@@ -2,6 +2,7 @@
 #include "models/qwen3_5/program/context_work.h"
 #include "models/qwen3_5/program/context.h"
 #include "models/qwen3_5/execution/linear.h"
+#include "models/qwen3_5/execution/vision_overlay.h"
 #include "core/device.h"
 #include "ninfer/ops/gdn_replay.h"
 #include "ninfer/ops/sampling.h"
@@ -1211,6 +1212,16 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
         }
         sequence.tail_hidden_valid      = true;
         request.timings.vision_seconds  = vision_seconds;
+        if (staged.vision) {
+            const auto& overlay = staged.vision->overlay_stats();
+            if (overlay.has_value()) {
+                request.timings.overlay_window_seconds  = overlay->window_seconds;
+                request.timings.overlay_evict_seconds   = overlay->evict_seconds;
+                request.timings.overlay_restore_seconds = overlay->restore_seconds;
+                request.timings.overlay_evicted_bytes   = overlay->evicted_bytes;
+                request.timings.overlay_staged_bytes    = overlay->staged_bytes;
+            }
+        }
         request.timings.prefill_seconds = std::max(0.0, staged.elapsed_seconds - vision_seconds);
         staged.prompt.release_all_media_payloads();
         if (staged.vision) { staged.vision->retire_handoff(); }

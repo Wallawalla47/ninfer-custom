@@ -25,6 +25,9 @@ struct FrontendOptions {
     std::size_t media_cache_bytes          = kDefaultMediaCacheBytes;
     std::size_t media_live_bytes           = kDefaultMediaLiveBytes;
     std::uint32_t media_preprocess_threads = 0;
+    // Cap on merged tokens a single image/video item may contribute; 0 leaves the
+    // processor defaults untouched.
+    std::uint32_t vision_max_merged_tokens = 32768;
     // Optional startup replacement for resources.chat_template_jinja. An empty path keeps
     // the artifact template. The replacement must resolve to an accepted template semantics.
     std::filesystem::path chat_template_path;

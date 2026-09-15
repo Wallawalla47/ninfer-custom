@@ -80,9 +80,9 @@ std::string serve_usage_text(const char* argv0) {
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
-           "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
-           "[--chat-template FILE] [--lm-head-draft] [--no-thinking] [--preserve-thinking] "
-           "[--cors] "
+           "[--vision] [--vision-residency R] [--vision-max-merged N] "
+           "[--no-cuda-graph] [--no-prefix-reuse] "
+           "[--lm-head-draft] [--no-thinking] [--preserve-thinking] [--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
            "[--frequency-penalty F] [--seed N] [--greedy]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n"
@@ -102,6 +102,11 @@ std::string serve_usage_text(const char* argv0) {
            "default\n"
            "       --log-stats-interval-ms defaults to 5000; 0 disables periodic throughput logs\n"
            "       --vision enables media and loads the fixed Vision GPU allocations\n"
+           "       --vision-residency R is resident (default fixed device allocation) or "
+           "overlay (pinned host, streamed per prefill window)\n"
+           "       --vision-max-merged N bounds merged vision tokens per item, 64-32768 "
+           "(default 32768)\n"
+           "       --vision-residency overlay requires --vision\n"
            "       --kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of sizing headroom\n"
@@ -305,14 +310,28 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.default_thinking_budget = static_cast<std::uint32_t>(budget);
         } else if (arg == "--vision") {
             options.enable_vision = true;
+        } else if (arg == "--vision-residency") {
+            const std::string_view value = require_value("--vision-residency");
+            if (value == "resident") {
+                options.vision_residency = ninfer::VisionResidency::Resident;
+            } else if (value == "overlay") {
+                options.vision_residency = ninfer::VisionResidency::Overlay;
+            } else {
+                throw std::invalid_argument("--vision-residency accepts resident or overlay");
+            }
+        } else if (arg == "--vision-max-merged") {
+            const std::uint32_t merged =
+                parse_nonnegative_int(require_value("--vision-max-merged"), "vision-max-merged");
+            if (merged < 64 || merged > 32768) {
+                throw std::invalid_argument("--vision-max-merged must be in [64, 32768]");
+            }
+            options.vision_max_merged_tokens = merged;
         } else if (arg == "--no-cuda-graph") {
             options.use_cuda_graph = false;
         } else if (arg == "--no-prefix-reuse") {
             options.allow_prefix_reuse = false;
         } else if (arg == "--lm-head-draft") {
             options.speculative.proposal_head = ProposalHead::Optimized;
-        } else if (arg == "--chat-template") {
-            options.chat_template_path = require_value("--chat-template");
         } else if (arg == "--no-thinking") {
             options.enable_thinking = false;
         } else if (arg == "--preserve-thinking") {
@@ -390,6 +409,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         throw std::invalid_argument("--prefill-chunk must be a positive multiple of 128");
     }
     product::validate_speculative_cli_options(options.speculative);
+    if (options.vision_residency == ninfer::VisionResidency::Overlay && !options.enable_vision) {
+        throw std::invalid_argument("--vision-residency overlay requires --vision");
+    }
     if (default_max_tokens_explicit) {
         if (options.default_max_tokens <= 0) {
             throw std::invalid_argument("--default-max-tokens must be positive");
