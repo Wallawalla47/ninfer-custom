@@ -34,9 +34,7 @@ std::vector<GraphExecutionProfile> dflash_base_profiles(std::uint32_t capacity,
     for (const std::uint32_t visible_end : {128U, 512U, 2048U, 4096U, 8198U, 16390U, 32768U}) {
         add_target_boundary(visible_end);
     }
-    if (draft_window >= 6 && draft_window <= 15) {
-        add_target_boundary(draft_window <= 11 ? 512U : 1024U);
-    }
+    if (draft_window >= 6) { add_target_boundary(draft_window <= 11 ? 512U : 1024U); }
     std::sort(ends.begin(), ends.end());
     ends.erase(std::unique(ends.begin(), ends.end()), ends.end());
     return graph_profiles_through(max_frontier, ends);
@@ -60,8 +58,17 @@ std::vector<GraphExecutionProfile> ordinary_graph_profiles(std::uint32_t capacit
 }
 
 std::vector<GraphExecutionProfile> mtp_graph_profiles(std::uint32_t capacity,
-                                                      std::uint32_t draft_window) {
+                                                      std::uint32_t draft_window,
+                                                      std::uint32_t neural_drafts) {
     if (draft_window == 0 || capacity == 0) { return {}; }
+    if (draft_window > 5) {
+        // Wide verification uses the same bounded attention tiers as DFlash2.
+        auto profiles = graph_profiles_through(capacity - 1, {96, 511, 2047, 8191, 32767});
+        for (std::size_t i = 0; i < profiles.size(); ++i) {
+            profiles[i].topology_class = static_cast<std::uint32_t>(i);
+        }
+        return profiles;
+    }
     // Bound the final AR window E+2K at split-policy transitions until the grid reaches its cap.
     std::vector<std::uint32_t> ends;
     const auto add_shifted = [&](std::uint32_t visible_end, std::uint32_t offset) {
@@ -85,14 +92,22 @@ std::vector<GraphExecutionProfile> mtp_graph_profiles(std::uint32_t capacity,
     }
     std::sort(ends.begin(), ends.end());
     ends.erase(std::unique(ends.begin(), ends.end()), ends.end());
-    return graph_profiles_through(capacity - 1, ends);
+    auto profiles = graph_profiles_through(capacity - 1, ends);
+    if (draft_window != neural_drafts) {
+        // Unequal verification/next-draft widths cannot share equal-width graphs.
+        for (std::size_t i = 0; i < profiles.size(); ++i) {
+            profiles[i].topology_class = static_cast<std::uint32_t>(i);
+        }
+    }
+    return profiles;
 }
 
 std::vector<GraphExecutionProfile> dflash_graph_profiles(SpeculativeBackend backend,
                                                          std::uint32_t capacity,
                                                          std::uint32_t draft_window,
                                                          std::uint32_t batch_size) {
-    if (capacity == 0 || draft_window == 0 || draft_window > 15) {
+    if (capacity == 0 || draft_window == 0 || draft_window > 63 ||
+        (draft_window > 15 && batch_size != 1)) {
         throw std::invalid_argument("invalid masked draft graph dimensions");
     }
     if (backend == SpeculativeBackend::DFlash2) {

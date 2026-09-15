@@ -124,8 +124,9 @@ struct AttentionCase {
     std::int32_t base;
     std::uint32_t envelope_max;
     std::uint32_t seed;
-    bool zero_q       = false;
-    bool graph_replay = false;
+    bool zero_q            = false;
+    bool graph_replay      = false;
+    bool wide_verification = false;
 };
 
 enum class MappingPattern { Identity, Offset, Fragmented };
@@ -1737,8 +1738,8 @@ int run_a1_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
     for (std::int32_t token = 0; token < test_case.tokens; ++token) {
         positions[static_cast<std::size_t>(token)] = test_case.base + token;
     }
-    const ops::CausalAttentionExecutionEnvelope envelope{static_cast<std::uint32_t>(total),
-                                                         test_case.envelope_max};
+    const ops::CausalAttentionExecutionEnvelope envelope{
+        static_cast<std::uint32_t>(total), test_case.envelope_max, test_case.wide_verification};
 
     const HostCache initial = make_cache(geometry, storage, max_context, test_case.seed + 10u);
     HostCache expected      = initial;
@@ -1830,8 +1831,8 @@ int run_a3_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
     for (std::int32_t token = 0; token < test_case.tokens; ++token) {
         positions[static_cast<std::size_t>(token)] = test_case.base + token;
     }
-    const ops::CausalAttentionExecutionEnvelope envelope{static_cast<std::uint32_t>(total),
-                                                         test_case.envelope_max};
+    const ops::CausalAttentionExecutionEnvelope envelope{
+        static_cast<std::uint32_t>(total), test_case.envelope_max, test_case.wide_verification};
 
     const HostCache cache_host = make_cache(geometry, storage, max_context, test_case.seed + 10u);
     const std::vector<double> reference = ideal_attention(q, cache_host, positions);
@@ -1887,7 +1888,8 @@ struct BatchAttentionCase {
     std::vector<std::int32_t> table_rows;
     MappingPattern mapping;
     std::uint32_t seed;
-    bool graph_replay = false;
+    bool graph_replay      = false;
+    bool wide_verification = false;
 };
 
 std::vector<float> extract_request_columns(const std::vector<float>& source,
@@ -1941,7 +1943,8 @@ int run_batch_case(const Geometry& geometry, KvCacheStorage storage,
             maximum_visible,
             test_case.contexts[b] + (test_case.graph_replay ? width : test_case.valid_columns[b]));
     const ops::CausalAttentionExecutionEnvelope envelope{static_cast<unsigned>(maximum_visible),
-                                                         static_cast<unsigned>(maximum_visible)};
+                                                         static_cast<unsigned>(maximum_visible),
+                                                         test_case.wide_verification};
     const std::size_t q_column_elements  = std::size_t(kHeadDim) * geometry.q_heads,
                       kv_column_elements = std::size_t(kHeadDim) * geometry.kv_heads;
     const std::size_t columns            = std::size_t(width) * batch;
@@ -2209,6 +2212,60 @@ int run_dflash2_cases() {
     return failures;
 }
 
+int run_wide_copy_cases(KvCacheStorage storage) {
+    int failures = 0;
+    for (const Geometry& geometry : kGeometries) {
+        for (int width = 17; width <= 64; ++width) {
+            failures += run_batch_case(geometry, storage,
+                                       {width,
+                                        {127},
+                                        {width},
+                                        {0},
+                                        MappingPattern::Fragmented,
+                                        static_cast<unsigned>(1900 + width),
+                                        false,
+                                        true});
+        }
+        for (int width : {17, 24, 32, 33, 48, 64}) {
+            for (int valid : {0, 1, width - 1, width}) {
+                failures += run_batch_case(geometry, storage,
+                                           {width,
+                                            {2048},
+                                            {valid},
+                                            {0},
+                                            MappingPattern::Fragmented,
+                                            static_cast<unsigned>(2000 + width + valid),
+                                            true,
+                                            true});
+            }
+            failures += run_a1_case(
+                geometry, storage,
+                {width, 8192, static_cast<unsigned>(8192 + width), 2101u, false, true, true},
+                MappingPattern::Fragmented);
+            failures += run_a3_case(
+                geometry, storage,
+                {width, 8192, static_cast<unsigned>(8192 + width), 2102u, false, true, true},
+                MappingPattern::Fragmented);
+        }
+        // A loose envelope must select the same safe workspace even when device positions
+        // are still inside the prompt-route region. Width 65 remains a prompt operation.
+        for (int width : {17, 32, 33, 64, 65}) {
+            for (unsigned maximum : {256u, 257u, 320u, 321u, 640u, 641u, 1024u, 1025u}) {
+                failures +=
+                    run_a3_case(geometry, storage, {width, 31, maximum, 2103u, false, false, true},
+                                MappingPattern::Offset);
+            }
+        }
+        for (int width : {17, 32, 33, 64}) {
+            failures +=
+                run_a1_case(geometry, storage,
+                            {width, 8192, static_cast<unsigned>(8192 + width), 2104u, false, true},
+                            MappingPattern::Fragmented);
+        }
+    }
+    return failures;
+}
+
 int run_batch_cases() {
     int failures = 0;
     for (auto storage :
@@ -2391,18 +2448,39 @@ int verify_workspace_capacity_contract() {
     for (const KvCacheStorage storage :
          {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64, KvCacheStorage::Fp8E4M3Row256,
           KvCacheStorage::Nvfp4Group16, KvCacheStorage::Fp8KeyNvfp4Value}) {
-        constexpr ops::CausalAttentionExecutionEnvelope envelope{1, 1025};
-        constexpr ops::AttentionHeadGeometry geometry{kHeadDim, 16, 2};
-        const std::size_t interval = ops::causal_softmax_attention_workspace_capacity_bytes(
-            geometry, storage, envelope, 1, 1, 17);
-        std::size_t witness = 0;
-        for (std::int32_t tokens = 1; tokens <= 17; ++tokens) {
-            witness = std::max(witness, ops::causal_softmax_attention_workspace_capacity_bytes(
-                                            geometry, storage, envelope, 1, tokens, tokens));
-        }
-        if (interval != witness) {
-            std::cerr << "causal_softmax_attention interval capacity has no exact route witness\n";
-            ++failures;
+        for (const Geometry& heads : kGeometries) {
+            for (bool wide : {false, true}) {
+                const ops::CausalAttentionExecutionEnvelope envelope{1, 1025, wide};
+                const ops::AttentionHeadGeometry geometry{kHeadDim, heads.q_heads, heads.kv_heads};
+                for (int first : {1, 17, 32, 33, 64, 65}) {
+                    const std::size_t interval =
+                        ops::causal_softmax_attention_workspace_capacity_bytes(
+                            geometry, storage, envelope, 1, first, 65);
+                    std::size_t witness = 0;
+                    for (std::int32_t tokens = first; tokens <= 65; ++tokens) {
+                        const auto exact = ops::causal_softmax_attention_workspace_capacity_bytes(
+                            geometry, storage, envelope, 1, tokens, tokens);
+                        witness = std::max(witness, exact);
+                        if ((tokens <= (wide ? 64 : 16)) != (exact != 0)) {
+                            std::cerr << "causal_softmax_attention wide route workspace mismatch\n";
+                            ++failures;
+                        }
+                    }
+                    if (interval != witness) {
+                        std::cerr << "causal_softmax_attention interval capacity has no exact "
+                                     "route witness\n";
+                        ++failures;
+                    }
+                }
+                for (int batch : {2, 8}) {
+                    try {
+                        (void)ops::causal_softmax_attention_workspace_capacity_bytes(
+                            geometry, storage, envelope, batch, 17, 32);
+                        std::cerr << "causal_softmax_attention accepted a wide multirow profile\n";
+                        ++failures;
+                    } catch (const std::invalid_argument&) {}
+                }
+            }
         }
     }
     try {
@@ -2436,6 +2514,18 @@ int run_softmax_attention_nvfp4_tests() {
     std::cout << (failures == 0 ? "PASS" : "FAIL")
               << " causal_softmax_attention nvfp4 independent correctness\n";
     return failures == 0 ? 0 : 1;
+}
+
+int run_softmax_attention_wide_tests() {
+    if (cuda_unavailable()) return 77;
+    int failures = verify_workspace_capacity_contract();
+    for (const auto storage :
+         {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64, KvCacheStorage::Fp8E4M3Row256,
+          KvCacheStorage::Nvfp4Group16, KvCacheStorage::Fp8KeyNvfp4Value}) {
+        failures += run_wide_copy_cases(storage);
+    }
+    std::cout << (failures ? "FAIL" : "PASS") << " wide causal attention\n";
+    return failures ? 1 : 0;
 }
 
 int run_softmax_attention_k8v4_tests() {

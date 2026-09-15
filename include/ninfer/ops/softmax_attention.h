@@ -18,6 +18,9 @@ inline constexpr std::uint32_t kCausalAttentionMaximumVisibleKeys = 262144;
 struct CausalAttentionExecutionEnvelope {
     std::uint32_t min_visible_keys = 0;
     std::uint32_t max_visible_keys = 0;
+    // Opt into chunked single-row verification through width 64; ordinary prompts keep
+    // their existing route. Workspace planning and execution must use the same hint.
+    bool wide_verification = false;
 };
 
 struct ContextAttentionExecutionEnvelope {

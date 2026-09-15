@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ninfer/types.h"
+#include "models/qwen3_5/ngram.h"
 #include "models/qwen3_5/frontend/output_session.h"
 #include "models/registry.h"
 #include "runtime/contract/request.h"
@@ -28,9 +29,8 @@ struct FrontendOptions {
     // Cap on merged tokens a single image/video item may contribute; 0 leaves the
     // processor defaults untouched.
     std::uint32_t vision_max_merged_tokens = 32768;
-    // Optional startup replacement for resources.chat_template_jinja. An empty path keeps
-    // the artifact template. The replacement must resolve to an accepted template semantics.
-    std::filesystem::path chat_template_path;
+    bool ngram_sources_enabled             = false;
+    bool ngram_archive_enabled             = false;
 };
 
 struct FrontendResources;
@@ -52,6 +52,8 @@ public:
     [[nodiscard]] PromptSummary summary() const;
     [[nodiscard]] PromptPreparationStats preparation_stats() const noexcept;
     [[nodiscard]] explicit operator bool() const noexcept;
+    [[nodiscard]] std::unique_ptr<NgramArchive::Request> bind_ngram(NgramArchive& archive,
+                                                                    const NgramSessionHints& hints);
 
 private:
     explicit PreparedPrompt(std::unique_ptr<PreparedPromptData> data) noexcept;
