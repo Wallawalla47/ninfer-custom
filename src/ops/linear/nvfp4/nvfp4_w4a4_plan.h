@@ -16,13 +16,14 @@
 namespace ninfer::ops::detail {
 
 struct Nvfp4W4a4Workspace {
-    std::uint8_t* codes  = nullptr;
-    std::uint8_t* scales = nullptr;
-    // Extent of the scale plane. The tiled layout writes over whole tiles, so it reaches past the
-    // real token count; carrying the size lets the quantizer check that rather than trust that the
-    // caller allocated through allocate_nvfp4_w4a4_workspace.
-    std::size_t scale_bytes = 0;
+    std::uint8_t* codes          = nullptr;
+    std::uint8_t* scales         = nullptr;
+    void* tma_descriptor_storage = nullptr;
 };
+
+#ifdef _WIN32
+inline constexpr std::size_t kNvfp4W4a4TmaDescriptorBytes = 4 * 128;
+#endif
 
 inline std::size_t nvfp4_w4a4_checked_bytes(std::int32_t tokens, std::size_t bytes_per_token) {
     if (tokens <= 0) { throw std::invalid_argument("nvfp4 W4A4 workspace: T must be positive"); }
@@ -41,15 +42,18 @@ Nvfp4W4a4Workspace allocate_nvfp4_w4a4_workspace(Arena& arena, std::int32_t toke
     }
     const std::size_t code_bytes =
         nvfp4_w4a4_checked_bytes(tokens, static_cast<std::size_t>(input_rows) / 2);
-    // The tiled layout addresses whole tiles, so the scale plane is allocated for the padded token
-    // count: at most 255 tokens of scales, under 0.3 MiB on the widest registered K, and paid
-    // whichever layout the quantizer then writes.
-    const std::size_t scale_bytes = nvfp4_w4a4_checked_bytes(
-        nvfp4_w4a4_padded_tokens(tokens), static_cast<std::size_t>(input_rows) / 16);
+    const std::size_t scale_bytes =
+        nvfp4_w4a4_checked_bytes(tokens, static_cast<std::size_t>(input_rows) / 16);
     const DeviceSpan codes  = arena.alloc_bytes(code_bytes, 256);
     const DeviceSpan scales = arena.alloc_bytes(scale_bytes, 256);
+#ifdef _WIN32
+    const DeviceSpan tma_descriptors = arena.alloc_bytes(kNvfp4W4a4TmaDescriptorBytes, 128);
     return {static_cast<std::uint8_t*>(codes.data), static_cast<std::uint8_t*>(scales.data),
-            scale_bytes};
+            tma_descriptors.data};
+#else
+    return {static_cast<std::uint8_t*>(codes.data), static_cast<std::uint8_t*>(scales.data),
+            nullptr};
+#endif
 }
 
 inline std::size_t nvfp4_w4a4_workspace_capacity_bytes(std::int32_t tokens,
@@ -60,7 +64,7 @@ inline std::size_t nvfp4_w4a4_workspace_capacity_bytes(std::int32_t tokens,
 }
 
 void launch_nvfp4_w4a4_quantize(const Tensor& x, const Weight& weight, Nvfp4W4a4Workspace workspace,
-                                Nvfp4ScaleLayout layout, cudaStream_t stream);
+                                cudaStream_t stream);
 
 
 } // namespace ninfer::ops::detail

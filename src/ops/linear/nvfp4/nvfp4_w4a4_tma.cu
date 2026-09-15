@@ -56,6 +56,7 @@ static_assert((kGateRows % TmaM256N128::kBlockN) == 0);
 
 template <class Geometry, class Schedule, class Epilogue, class Output>
 void launch_tma(const std::uint8_t* activation_codes, const std::uint8_t* activation_scales,
+                void* descriptor_storage,
                 const std::uint8_t* weight_codes, const std::uint8_t* weight_scales,
                 std::int32_t tokens, float alpha, Epilogue epilogue, Output output,
                 cudaStream_t stream) {
@@ -63,6 +64,12 @@ void launch_tma(const std::uint8_t* activation_codes, const std::uint8_t* activa
         make_nvfp4_w4a4_tma_descriptors<Geometry, Schedule::kBlockM>(
             activation_codes, activation_scales, weight_codes, weight_scales, tokens,
             Schedule::kWeightCodePromotion);
+#ifdef _WIN32
+    CUDA_CHECK(cudaMemcpyAsync(descriptor_storage, &descriptors, sizeof(descriptors),
+                               cudaMemcpyHostToDevice, stream));
+#else
+    (void)descriptor_storage;
+#endif
     constexpr std::size_t kSharedBytes = sizeof(Nvfp4W4a4TmaSharedStorage<Schedule>);
     static const bool kConfigured      = [] {
         CUDA_CHECK(cudaFuncSetAttribute(nvfp4_w4a4_tma_kernel<Geometry, Schedule, Epilogue, Output>,
@@ -72,100 +79,113 @@ void launch_tma(const std::uint8_t* activation_codes, const std::uint8_t* activa
     }();
     (void)kConfigured;
 
-    // The last M tile may be partial; the kernel bounds itself by the real token count.
-    const dim3 grid(Geometry::kOutputRows / Schedule::kBlockN,
-                    (tokens + Schedule::kBlockM - 1) / Schedule::kBlockM);
-    nvfp4_w4a4_tma_kernel<Geometry, Schedule><<<grid, Schedule::kThreads, kSharedBytes, stream>>>(
-        descriptors, alpha, epilogue, output, tokens);
+    const dim3 grid(Geometry::kOutputRows / Schedule::kBlockN, tokens / Schedule::kBlockM);
+    nvfp4_w4a4_tma_kernel<Geometry, Schedule>
+        <<<grid, Schedule::kThreads, kSharedBytes, stream>>>(
+#ifdef _WIN32
+            static_cast<const Nvfp4W4a4TmaDescriptors*>(descriptor_storage),
+#else
+            descriptors,
+#endif
+            alpha, epilogue, output);
     CUDA_CHECK(cudaGetLastError());
 }
 
 template <class Geometry, class Schedule = TmaM256N128>
 void launch_linear(const std::uint8_t* activation_codes, const std::uint8_t* activation_scales,
+                   void* descriptor_storage,
                    const std::uint8_t* weight_codes, const std::uint8_t* weight_scales,
                    __nv_bfloat16* output, std::int32_t tokens, float alpha, cudaStream_t stream) {
-    launch_tma<Geometry, Schedule>(activation_codes, activation_scales, weight_codes, weight_scales,
-                                   tokens, alpha, Nvfp4IdentityEpilogue{},
-                                   Nvfp4ContiguousOutput{output, Geometry::kOutputRows}, stream);
+    launch_tma<Geometry, Schedule>(
+        activation_codes, activation_scales, descriptor_storage, weight_codes, weight_scales,
+        tokens, alpha, Nvfp4IdentityEpilogue{},
+        Nvfp4ContiguousOutput{output, Geometry::kOutputRows}, stream);
 }
 
 } // namespace
 
 void launch_nvfp4_w4a4_tma_linear(Nvfp4GeometryId problem, const std::uint8_t* activation_codes,
                                   const std::uint8_t* activation_scales,
+                                  void* descriptor_storage,
                                   const std::uint8_t* weight_codes,
                                   const std::uint8_t* weight_scales, __nv_bfloat16* output,
                                   std::int32_t tokens, float alpha, cudaStream_t stream) {
     switch (problem) {
     case Nvfp4GeometryId::N14336K5120:
-        launch_linear<Nvfp4N14336K5120>(activation_codes, activation_scales, weight_codes,
-                                        weight_scales, output, tokens, alpha, stream);
+        launch_linear<Nvfp4N14336K5120>(activation_codes, activation_scales, descriptor_storage,
+                                        weight_codes, weight_scales, output, tokens, alpha, stream);
         return;
     case Nvfp4GeometryId::N16384K5120:
-        launch_linear<Nvfp4N16384K5120>(activation_codes, activation_scales, weight_codes,
-                                        weight_scales, output, tokens, alpha, stream);
+        launch_linear<Nvfp4N16384K5120>(activation_codes, activation_scales, descriptor_storage,
+                                        weight_codes, weight_scales, output, tokens, alpha, stream);
         return;
     case Nvfp4GeometryId::N34816K5120:
         launch_linear<Nvfp4N34816K5120, TmaM256N128Prefetch128B>(
-            activation_codes, activation_scales, weight_codes, weight_scales, output, tokens, alpha,
-            stream);
+            activation_codes, activation_scales, descriptor_storage, weight_codes, weight_scales,
+            output, tokens, alpha, stream);
         return;
     case Nvfp4GeometryId::N5120K6144:
-        launch_linear<Nvfp4N5120K6144>(activation_codes, activation_scales, weight_codes,
-                                       weight_scales, output, tokens, alpha, stream);
+        launch_linear<Nvfp4N5120K6144>(activation_codes, activation_scales, descriptor_storage,
+                                       weight_codes, weight_scales, output, tokens, alpha, stream);
         return;
     case Nvfp4GeometryId::N5120K17408:
-        launch_linear<Nvfp4N5120K17408>(activation_codes, activation_scales, weight_codes,
-                                        weight_scales, output, tokens, alpha, stream);
+        launch_linear<Nvfp4N5120K17408>(activation_codes, activation_scales, descriptor_storage,
+                                        weight_codes, weight_scales, output, tokens, alpha, stream);
         return;
     }
 }
 
 void launch_nvfp4_w4a4_tma_attention(const std::uint8_t* activation_codes,
                                      const std::uint8_t* activation_scales,
+                                     void* descriptor_storage,
                                      const std::uint8_t* weight_codes,
                                      const std::uint8_t* weight_scales, __nv_bfloat16* query,
                                      __nv_bfloat16* gate, __nv_bfloat16* key, __nv_bfloat16* value,
                                      std::int32_t tokens, float alpha, cudaStream_t stream) {
-    launch_tma<Nvfp4N14336K5120, TmaM256N128>(activation_codes, activation_scales, weight_codes,
-                                              weight_scales, tokens, alpha, Nvfp4IdentityEpilogue{},
-                                              AttentionOutput{query, key, gate, value}, stream);
+    launch_tma<Nvfp4N14336K5120, TmaM256N128>(
+        activation_codes, activation_scales, descriptor_storage, weight_codes, weight_scales,
+        tokens, alpha, Nvfp4IdentityEpilogue{}, AttentionOutput{query, key, gate, value}, stream);
 }
 
 void launch_nvfp4_w4a4_tma_gdn(const std::uint8_t* activation_codes,
                                const std::uint8_t* activation_scales,
+                               void* descriptor_storage,
                                const std::uint8_t* weight_codes, const std::uint8_t* weight_scales,
                                __nv_bfloat16* qkv, __nv_bfloat16* z, std::int32_t tokens,
                                float alpha, cudaStream_t stream) {
-    launch_tma<Nvfp4N16384K5120, TmaM256N128>(activation_codes, activation_scales, weight_codes,
-                                              weight_scales, tokens, alpha, Nvfp4IdentityEpilogue{},
-                                              Nvfp4GdnInputOutput{qkv, z}, stream);
+    launch_tma<Nvfp4N16384K5120, TmaM256N128>(
+        activation_codes, activation_scales, descriptor_storage, weight_codes, weight_scales,
+        tokens, alpha, Nvfp4IdentityEpilogue{}, Nvfp4GdnInputOutput{qkv, z}, stream);
 }
 
 template <class Geometry>
 void launch_linear_add(const std::uint8_t* activation_codes, const std::uint8_t* activation_scales,
+                       void* descriptor_storage,
                        const std::uint8_t* weight_codes, const std::uint8_t* weight_scales,
                        __nv_bfloat16* residual, std::int32_t tokens, float alpha,
                        cudaStream_t stream) {
     launch_tma<Geometry, TmaM256N128>(
-        activation_codes, activation_scales, weight_codes, weight_scales, tokens, alpha,
-        Nvfp4AddResidualEpilogue{residual, Geometry::kOutputRows},
+        activation_codes, activation_scales, descriptor_storage, weight_codes, weight_scales,
+        tokens, alpha, Nvfp4AddResidualEpilogue{residual, Geometry::kOutputRows},
         Nvfp4ContiguousOutput{residual, Geometry::kOutputRows}, stream);
 }
 
 void launch_nvfp4_w4a4_tma_linear_add(Nvfp4GeometryId problem, const std::uint8_t* activation_codes,
                                       const std::uint8_t* activation_scales,
+                                      void* descriptor_storage,
                                       const std::uint8_t* weight_codes,
                                       const std::uint8_t* weight_scales, __nv_bfloat16* residual,
                                       std::int32_t tokens, float alpha, cudaStream_t stream) {
     switch (problem) {
     case Nvfp4GeometryId::N5120K6144:
-        launch_linear_add<Nvfp4N5120K6144>(activation_codes, activation_scales, weight_codes,
-                                           weight_scales, residual, tokens, alpha, stream);
+        launch_linear_add<Nvfp4N5120K6144>(activation_codes, activation_scales,
+                                           descriptor_storage, weight_codes, weight_scales,
+                                           residual, tokens, alpha, stream);
         return;
     case Nvfp4GeometryId::N5120K17408:
-        launch_linear_add<Nvfp4N5120K17408>(activation_codes, activation_scales, weight_codes,
-                                            weight_scales, residual, tokens, alpha, stream);
+        launch_linear_add<Nvfp4N5120K17408>(activation_codes, activation_scales,
+                                            descriptor_storage, weight_codes, weight_scales,
+                                            residual, tokens, alpha, stream);
         return;
     case Nvfp4GeometryId::N14336K5120:
     case Nvfp4GeometryId::N16384K5120:

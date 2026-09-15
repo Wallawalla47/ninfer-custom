@@ -98,6 +98,7 @@ void launch_nvfp4_a4_tma(const Weight& weight, Tensor& out, Nvfp4W4a4Workspace s
                          std::int32_t tokens, cudaStream_t stream) {
     const float alpha = 1.0f / (weight.input_scale_divisor * weight.weight_scale_divisor);
     launch_nvfp4_w4a4_tma_linear(Geometry, scratch.codes, scratch.scales,
+                                 scratch.tma_descriptor_storage,
                                  static_cast<const std::uint8_t*>(weight.qdata),
                                  static_cast<const std::uint8_t*>(weight.scales),
                                  static_cast<__nv_bfloat16*>(out.data), tokens, alpha, stream);
