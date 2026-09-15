@@ -23,6 +23,7 @@ enum class Nvfp4LinearSwiGluRoute {
 };
 
 constexpr std::int32_t kFusedMaxTokens = 128;
+constexpr std::int32_t kRaggedFloor    = kNvfp4TmaBlockM + kNvfp4TmaBlockM / 2;
 
 Nvfp4LinearSwiGluRoute resolve_route(LinearPolicy policy, std::int32_t tokens) {
     if (tokens <= 0) { throw std::invalid_argument("nvfp4 linear_swiglu: T must be positive"); }
@@ -39,7 +40,11 @@ Nvfp4LinearSwiGluRoute resolve_route(LinearPolicy policy, std::int32_t tokens) {
     if (tokens <= kFusedMaxTokens) { return Nvfp4LinearSwiGluRoute::FusedW4A4; }
     // This route dispatches its own fused kernel rather than a Linear shape's, so it carries its
     // own condition; the call site below forces the matching scale layout.
-    if (tokens >= kNvfp4TmaBlockM && (tokens % kNvfp4TmaBlockM) == 0) {
+    //
+    // It no longer needs a whole number of tiles, but a width just past one tile would pay for a
+    // second tile that is almost all padding - at 257 tokens that is a third of the work for one
+    // token of it. So: one whole tile, or one and a half and up.
+    if (tokens == kNvfp4TmaBlockM || tokens >= kRaggedFloor) {
         return Nvfp4LinearSwiGluRoute::TmaFusedW4A4;
     }
     return Nvfp4LinearSwiGluRoute::LinearW4A4Post;
@@ -96,19 +101,24 @@ std::size_t nvfp4_linear_swiglu_workspace_capacity_bytes(LinearPolicy policy,
     if (min_tokens <= kFusedMaxTokens && max_tokens >= 5) {
         maximum = fused_workspace_bytes(std::min(max_tokens, kFusedMaxTokens));
     }
-    if (max_tokens >= kNvfp4TmaBlockM) {
-        const std::int32_t largest_fused = max_tokens - (max_tokens % kNvfp4TmaBlockM);
-        if (largest_fused >= std::max(min_tokens, kNvfp4TmaBlockM)) {
-            maximum = std::max(maximum, fused_workspace_bytes(largest_fused));
+    // The fused TMA route is no longer confined to multiples of the tile, so the widest width that
+    // reaches it is max_tokens itself whenever the route admits it.
+    for (std::int32_t tokens = max_tokens; tokens >= std::max(min_tokens, kNvfp4TmaBlockM);
+         --tokens) {
+        if (resolve_route(policy, tokens) == Nvfp4LinearSwiGluRoute::TmaFusedW4A4) {
+            maximum = std::max(maximum, fused_workspace_bytes(tokens));
+            break;
         }
     }
 
-    std::int32_t last_baseline = max_tokens;
-    if (resolve_route(policy, last_baseline) == Nvfp4LinearSwiGluRoute::TmaFusedW4A4) {
-        --last_baseline;
-    }
-    if (last_baseline >= std::max(min_tokens, kFusedMaxTokens + 1)) {
-        maximum = std::max(maximum, baseline_workspace_bytes(last_baseline));
+    // Likewise the widest width that still falls through to the baseline route: scan down for it
+    // rather than assume it is one below max_tokens.
+    for (std::int32_t tokens = max_tokens; tokens >= std::max(min_tokens, kFusedMaxTokens + 1);
+         --tokens) {
+        if (resolve_route(policy, tokens) == Nvfp4LinearSwiGluRoute::LinearW4A4Post) {
+            maximum = std::max(maximum, baseline_workspace_bytes(tokens));
+            break;
+        }
     }
     return maximum;
 }

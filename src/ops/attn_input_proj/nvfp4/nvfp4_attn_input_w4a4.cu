@@ -60,9 +60,7 @@ using M128N128Resident  = Nvfp4W4a4MmaSchedule<128, 128, 256, 4, 2, 1, 2>;
 
 // This projection selects its own route, so the layout the quantizer writes below must be derived
 // from the same predicate; the two are read together at the call site for that reason.
-constexpr bool w4a4_tma_route(std::int32_t tokens) {
-    return tokens >= 1024 && (tokens % kNvfp4TmaBlockM) == 0;
-}
+constexpr bool w4a4_tma_route(std::int32_t tokens) { return tokens >= 1024; }
 
 template <class Schedule>
 void launch_gemm(const Weight& weight, Tensor& q, Tensor& gate, Tensor& k, Tensor& v,

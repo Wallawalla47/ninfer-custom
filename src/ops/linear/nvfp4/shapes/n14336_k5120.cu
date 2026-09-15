@@ -40,8 +40,7 @@ Nvfp4Launch select_a16(std::int32_t tokens) {
 }
 
 Nvfp4A4Route select_a4(std::int32_t tokens) {
-    if (tokens >= 1024 && (tokens % kNvfp4TmaBlockM) == 0)
-        return nvfp4_a4_tma_route<Nvfp4GeometryId::N14336K5120>();
+    if (tokens >= 1024) return nvfp4_a4_tma_route<Nvfp4GeometryId::N14336K5120>();
     if (tokens <= 64) return nvfp4_a4_mma_route<Geometry, T32R64>();
     if (tokens <= 96) return nvfp4_a4_mma_route<Geometry, T32R128>();
     if (tokens <= 128) return nvfp4_a4_mma_route<Geometry, T128R128Pipelined>();

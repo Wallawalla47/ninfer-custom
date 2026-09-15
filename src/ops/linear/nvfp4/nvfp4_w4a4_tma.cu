@@ -72,7 +72,9 @@ void launch_tma(const std::uint8_t* activation_codes, const std::uint8_t* activa
     }();
     (void)kConfigured;
 
-    const dim3 grid(Geometry::kOutputRows / Schedule::kBlockN, tokens / Schedule::kBlockM);
+    // The last M tile may be partial; the kernel bounds itself by the real token count.
+    const dim3 grid(Geometry::kOutputRows / Schedule::kBlockN,
+                    (tokens + Schedule::kBlockM - 1) / Schedule::kBlockM);
 #ifdef _WIN32
     // MSVC cannot pass the over-aligned (alignas(128)) CUtensorMap struct by value as a
     // __grid_constant__ parameter, so the descriptors are staged into device global memory; the
@@ -102,11 +104,12 @@ void launch_tma(const std::uint8_t* activation_codes, const std::uint8_t* activa
                                cudaMemcpyHostToDevice, stream));
     nvfp4_w4a4_tma_kernel<Geometry, Schedule, Epilogue, Output>
         <<<grid, Schedule::kThreads, kSharedBytes, stream>>>(persistent_device, alpha, epilogue,
-                                                             output);
+                                                             output, tokens);
     CUDA_CHECK(cudaGetLastError());
 #else
     nvfp4_w4a4_tma_kernel<Geometry, Schedule, Epilogue, Output>
-        <<<grid, Schedule::kThreads, kSharedBytes, stream>>>(descriptors, alpha, epilogue, output);
+        <<<grid, Schedule::kThreads, kSharedBytes, stream>>>(descriptors, alpha, epilogue, output,
+                                                             tokens);
     CUDA_CHECK(cudaGetLastError());
 #endif
 }

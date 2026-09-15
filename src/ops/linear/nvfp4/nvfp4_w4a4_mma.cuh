@@ -409,7 +409,8 @@ __device__ __forceinline__ std::int64_t nvfp4_tiled_scale_offset(int token, int 
 template <class Geometry, int Threads, Nvfp4ScaleLayout Layout>
 __global__ __launch_bounds__(Threads, 512 / Threads) void nvfp4_w4a4_quantize_kernel(
     const __nv_bfloat16* __restrict__ input, std::uint8_t* __restrict__ codes,
-    std::uint8_t* __restrict__ scales, std::int32_t tokens, float input_scale_divisor) {
+    std::uint8_t* __restrict__ scales, std::int32_t tokens, std::int32_t written_tokens,
+    float input_scale_divisor) {
     static_assert(Threads == 128 || Threads == 256 || Threads == 512);
     static_assert(Layout == Nvfp4ScaleLayout::RowMajor ||
                   (Geometry::kInputRows / 16) % kNvfp4ScaleTileGroups == 0);
@@ -417,7 +418,21 @@ __global__ __launch_bounds__(Threads, 512 / Threads) void nvfp4_w4a4_quantize_ke
     const int task =
         static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
     const int tasks = tokens * kGroupsPerRow;
-    if (task >= tasks) { return; }
+    if (task >= tasks) {
+        // The tiled plane is addressed in whole tiles, so the launch covers the padding of the last
+        // one. A padded token owns no input and no code byte, only the scale the consumer's tile
+        // will read; zero it so it is defined rather than whatever the arena last held.
+        // written_tokens is the extent the plane was allocated for and bounds this store; it equals
+        // tokens for the row-major layout, which stops at the real count.
+        if constexpr (Layout == Nvfp4ScaleLayout::Tiled) {
+            const int pad_token = task / kGroupsPerRow;
+            if (pad_token < written_tokens) {
+                const int pad_group = task - pad_token * kGroupsPerRow;
+                scales[nvfp4_tiled_scale_offset<Geometry>(pad_token, pad_group)] = 0;
+            }
+        }
+        return;
+    }
 
     const int token                   = task / kGroupsPerRow;
     const int group                   = task - token * kGroupsPerRow;

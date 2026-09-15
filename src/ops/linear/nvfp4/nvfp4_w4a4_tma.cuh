@@ -79,14 +79,13 @@ Nvfp4W4a4TmaDescriptors make_nvfp4_w4a4_tma_descriptors(
         const_cast<std::uint8_t*>(weight_codes), CU_TENSOR_MAP_DATA_TYPE_UINT8,
         Geometry::kCodeBytesPerRow, Geometry::kOutputRows, Geometry::kCodeBytesPerRow, kCodeColumns,
         kBlockN, CU_TENSOR_MAP_SWIZZLE_64B, "encode weight codes TMA", weight_code_promotion);
-    // dim1 counts whole token tiles, so a partial one would describe a shorter plane than the
-    // quantizer wrote. The route that selects this descriptor admits only multiples of BlockM.
-    if (tokens <= 0 || (tokens % BlockM) != 0) {
-        throw std::invalid_argument("nvfp4 W4A4 TMA descriptors need whole token tiles");
+    if (tokens <= 0) {
+        throw std::invalid_argument("nvfp4 W4A4 TMA descriptors need a positive token count");
     }
     descriptors.a_scales = nvfp4_make_tma_2d(
         const_cast<std::uint8_t*>(activation_scales), CU_TENSOR_MAP_DATA_TYPE_UINT8, BlockM,
-        (static_cast<std::uint64_t>(tokens) / BlockM) * kScaleTilesPerPlane * kScaleTileGroups,
+        (static_cast<std::uint64_t>(nvfp4_w4a4_padded_tokens(tokens)) / BlockM) *
+            kScaleTilesPerPlane * kScaleTileGroups,
         BlockM, BlockM, kScaleTileGroups, CU_TENSOR_MAP_SWIZZLE_NONE,
         "encode activation scales TMA");
     descriptors.b_scales = nvfp4_make_tma_2d(
@@ -192,10 +191,11 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_w4a4
     // global memory. The epilogue/output keep ordinary by-value passing because a grid-constant
     // struct holding a sub-8-byte member (the contiguous output's int32 stride) mis-packs.
     const Nvfp4W4a4TmaDescriptors* descriptors_pointer, float alpha, const Epilogue epilogue,
-    const OutputPolicy output
+    const OutputPolicy output, int token_count
 #else
     const __grid_constant__ Nvfp4W4a4TmaDescriptors descriptors, float alpha,
-    const __grid_constant__ Epilogue epilogue, const __grid_constant__ OutputPolicy output
+    const __grid_constant__ Epilogue epilogue, const __grid_constant__ OutputPolicy output,
+    int token_count
 #endif
     ) {
     static_assert((Geometry::kInputRows % Schedule::kBlockK) == 0);
@@ -397,10 +397,14 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_w4a4
                 shared_output + token0 * kOutputStride + parent_row);
             auto* destination1 = reinterpret_cast<__nv_bfloat162*>(
                 shared_output + token1 * kOutputStride + parent_row);
-            const int global_row0   = row_begin + parent_row;
-            const int global_row1   = global_row0 + 1;
-            const int global_token0 = token_begin + token0;
-            const int global_token1 = token_begin + token1;
+            const int global_row0 = row_begin + parent_row;
+            const int global_row1 = global_row0 + 1;
+            // The last M tile may be partial. The activation descriptors carry the real token count
+            // as their row extent, so TMA zero-fills the rows past the end; the padded lanes only
+            // have to stay off other people's memory, so clamp the token index the epilogue reads
+            // with and drop their store below.
+            const int global_token0 = min(token_begin + token0, token_count - 1);
+            const int global_token1 = min(token_begin + token1, token_count - 1);
             const float value00 =
                 epilogue.apply(global_row0, global_token0, accumulators[mma_m][mma_n][0] * alpha);
             const float value01 =
@@ -421,6 +425,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_w4a4
         const int token_local = task / kVectorsPerRow;
         const int row_vector  = task - token_local * kVectorsPerRow;
         const int token       = token_begin + token_local;
+        if (token >= token_count) { continue; }
         const uint4 values =
             load_vec<uint4>(shared_output + token_local * kOutputStride + row_vector * 8);
         output.store_vector(row_begin + row_vector * 8, token, values);
