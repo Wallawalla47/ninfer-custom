@@ -79,29 +79,51 @@ void launch_tma(const std::uint8_t* activation_codes, const std::uint8_t* activa
     // MSVC cannot pass the over-aligned (alignas(128)) CUtensorMap struct by value as a
     // __grid_constant__ parameter, so the descriptors are staged into device global memory; the
     // kernel reads them there and makes them visible to the TMA (tensormap) proxy with a
-    // fence.proxy.tensormap acquire (see kernel). The host source of the cudaMemcpyAsync must
-    // stay live while the copy may be captured: a stack local would dangle once this call
-    // returns, and a replayed graph would then copy a torn tensormap and fault, so a persistent
-    // pinned buffer holds it. The device destination is likewise persistent: a per-launch
+    // fence.proxy.tensormap acquire (see kernel).
+    //
+    // The device destination is a single persistent buffer: a per-launch
     // cudaMallocAsync/cudaFreeAsync round-trip stalls the stream ~500 us per launch, while the
     // engine serializes every TMA launch onto one compute stream (prefill and CausalScoring are
     // the only callers; the decode graph never reaches this route), so in-stream ordering
     // guarantees the next launch's copy cannot start until this launch's kernel has read the
-    // buffer. Both buffers are shared across calls and never freed (one 512-byte allocation
-    // each, reclaimed at process exit).
-    static Nvfp4W4a4TmaDescriptors* persistent_host = [] {
-        void* p = nullptr;
-        CUDA_CHECK(cudaMallocHost(&p, sizeof(Nvfp4W4a4TmaDescriptors)));
-        return reinterpret_cast<Nvfp4W4a4TmaDescriptors*>(p);
-    }();
+    // buffer.
+    //
+    // The host source cannot be a single buffer. cudaMemcpyAsync reads a pinned source
+    // asynchronously on the GPU, so the host may race ahead and overwrite it before the previous
+    // copy has been read - a later layer then stages its descriptors over an earlier one and the
+    // earlier kernel computes against the wrong tensors. The source therefore lives in a ring of
+    // pinned slots, each guarded by an event recorded after its copy: a slot is rewritten only
+    // after the copy that last used it has completed, which stalls the host solely when it laps
+    // the ring (i.e. runs kDescriptorRing launches ahead of the GPU). Nothing is freed; the ring
+    // (one 512-byte allocation per slot) is reclaimed at process exit.
+    constexpr int kDescriptorRing = 32;
     static Nvfp4W4a4TmaDescriptors* persistent_device = [] {
         void* p = nullptr;
         CUDA_CHECK(cudaMalloc(&p, sizeof(Nvfp4W4a4TmaDescriptors)));
         return reinterpret_cast<Nvfp4W4a4TmaDescriptors*>(p);
     }();
-    *persistent_host = descriptors;
-    CUDA_CHECK(cudaMemcpyAsync(persistent_device, persistent_host, sizeof(Nvfp4W4a4TmaDescriptors),
-                               cudaMemcpyHostToDevice, stream));
+    static Nvfp4W4a4TmaDescriptors* ring_host[kDescriptorRing] = {};
+    static cudaEvent_t ring_events[kDescriptorRing]            = {};
+    static std::uint64_t ring_next                             = 0;
+    static const bool ring_ready = [&] {
+        for (int slot = 0; slot < kDescriptorRing; ++slot) {
+            void* p = nullptr;
+            CUDA_CHECK(cudaMallocHost(&p, sizeof(Nvfp4W4a4TmaDescriptors)));
+            ring_host[slot] = reinterpret_cast<Nvfp4W4a4TmaDescriptors*>(p);
+            CUDA_CHECK(cudaEventCreateWithFlags(&ring_events[slot], cudaEventDisableTiming));
+        }
+        return true;
+    }();
+    (void)ring_ready;
+    const int slot = static_cast<int>(ring_next % kDescriptorRing);
+    if (ring_next >= static_cast<std::uint64_t>(kDescriptorRing)) {
+        CUDA_CHECK(cudaEventSynchronize(ring_events[slot]));
+    }
+    *ring_host[slot] = descriptors;
+    CUDA_CHECK(cudaMemcpyAsync(persistent_device, ring_host[slot],
+                               sizeof(Nvfp4W4a4TmaDescriptors), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaEventRecord(ring_events[slot], stream));
+    ++ring_next;
     nvfp4_w4a4_tma_kernel<Geometry, Schedule, Epilogue, Output>
         <<<grid, Schedule::kThreads, kSharedBytes, stream>>>(persistent_device, alpha, epilogue,
                                                              output, tokens);
