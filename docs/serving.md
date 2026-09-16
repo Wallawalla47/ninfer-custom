@@ -779,6 +779,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--port N` | listen port | `8080` |
 | `--api-key KEY` | required bearer or `x-api-key` value | unset |
 | `--model-id ID` | override the public OpenAI model alias | artifact `identity.model_id` |
+| `--rope-yarn-factor F` | startup-fixed runtime YaRN factor, finite `[1,4]`; extends allowed ceiling only | `1` |
 | `--max-context N` | logical context ceiling of each sequence | `8192` |
 | `--kv-capacity N\|auto` | explicit shared Main Text KV capacity, or maximize it from remaining GPU memory; omitted means `--max-context` | `8192` |
 | `--max-concurrency N` | maximum admitted requests; valid range `1..8` | `1` |
@@ -970,6 +971,13 @@ Input memory is bounded by the outstanding-request count and the per-request
 media request retains the same cancellation and timeout deadline. Model output is bounded by the
 same finite request count and each request's effective output-token limit; output callbacks and
 network serialization run outside the GPU executor and do not delay formation of the next batch.
+
+`--rope-yarn-factor F` is a startup-fixed runtime override shared by every request in this server;
+it is not a per-request API parameter and does not modify artifact configuration. It accepts finite
+values in `[1,4]` (default `1`, native RoPE unchanged). It extends only the allowed ceiling: the
+8,192-token default stays unchanged unless `--max-context` is explicitly increased. KV memory and
+selected speculative-backend limits still apply. Long-context extrapolation does not guarantee
+answer quality; validate the workload before deployment.
 
 `--max-context` is each sequence's logical ceiling. `--kv-capacity` fixes the shared Main Text KV
 pool used by active requests and retained prefixes. `auto` accounts for the complete enabled runtime

@@ -30,6 +30,7 @@ struct ServeOptions {
     // Optional startup override for the artifact's frontend/chat_template.jinja.
     std::filesystem::path chat_template_path;
     std::string request_log_jsonl;                // empty => structured request logging disabled
+    float rope_yarn_factor             = 1.0F;
     std::uint32_t max_context          = 8192;
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(8192);
     std::optional<std::size_t> kv_headroom_mib;

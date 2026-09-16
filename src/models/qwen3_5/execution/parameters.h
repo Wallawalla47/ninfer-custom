@@ -1,6 +1,7 @@
 #pragma once
 
 #include "models/qwen3_5/model.h"
+#include "ninfer/ops/rope.h"
 #include "ninfer/ops/weight_input.h"
 
 #include <array>
@@ -58,6 +59,8 @@ struct BlockParameters {
 };
 
 struct TextParameters {
+    // Prepared once for the Text backbone and its MTP companion; absent for GDN-only data.
+    std::optional<ops::PreparedRope> rope;
     Weight token_embedding;
     LinearParameters output_head;
     Tensor final_norm;
@@ -125,6 +128,7 @@ struct SelectorParameters {
 };
 
 struct DraftParameters {
+    ops::PreparedRope rope;
     LinearParameters feature_projection;
     Tensor context_norm, final_norm;
     std::vector<DraftBlockParameters> layers;

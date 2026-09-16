@@ -52,6 +52,10 @@ add_test(NAME ninfer_softmax_attention_nvfp4_test
 add_test(NAME ninfer_softmax_attention_k8v4_test
   COMMAND ninfer_softmax_attention_test --k8v4-only)
 
+add_test(NAME ninfer_softmax_attention_extended_test
+  COMMAND ninfer_softmax_attention_test --extended-only)
+set_tests_properties(ninfer_softmax_attention_extended_test PROPERTIES SKIP_RETURN_CODE 77)
+
 set_tests_properties(
   ninfer_softmax_attention_nvfp4_test
   ninfer_softmax_attention_k8v4_test

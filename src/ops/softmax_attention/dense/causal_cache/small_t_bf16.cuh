@@ -142,9 +142,15 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
     const int key_blocks = div_up(split_end - first_tile, Bc);
     const int first_page = first_tile >> kPagedKVPageShift;
     const int page_count = ((split_end - 1) >> kPagedKVPageShift) - first_page + 1;
-    for (int page = tid; page < page_count; page += Threads) {
+    for (int page = tid; page < min(page_count, PageIds); page += Threads) {
         physical_pages_s[page] = block_table[first_page + page];
     }
+    // Native splits retain shared staging; larger splits read their remaining pages directly.
+    // A pipelined lookahead beyond this split must not dereference a non-existent page.
+    const auto physical_page_at = [&](int page) {
+        if (page < 0 || page >= page_count) { return block_table[first_page]; }
+        return page < PageIds ? physical_pages_s[page] : block_table[first_page + page];
+    };
 
     if constexpr (CacheInput::writes_cache) {
         // The owning split writes each new row. K is copied exactly and V is rounded once to FP16.
@@ -205,7 +211,7 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
                     smem_addr(&qkv_s[arow * D + causal_small_t_tc_swz(arow, acol)]));
     }
     __syncthreads();
-    int physical_page = physical_pages_s[0];
+    int physical_page = physical_page_at(0);
     float acc[PVNt][4];
 #pragma unroll
     for (int n = 0; n < PVNt; ++n) {
@@ -217,7 +223,7 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
     for (int kb = 0; kb < key_blocks; ++kb) {
         const int k0 = first_tile + kb * Bc;
         if (kb != 0 && (k0 & kPagedKVPageMask) == 0) {
-            physical_page = physical_pages_s[(k0 >> kPagedKVPageShift) - first_page];
+            physical_page = physical_page_at((k0 >> kPagedKVPageShift) - first_page);
         }
         // Stage BF16 K and persistent FP16 V with one cp.async wave (16B/thread, high MLP).
         // Current-step K comes from input and V from the row converted above; tail slots are
