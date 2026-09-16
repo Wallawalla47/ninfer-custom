@@ -52,6 +52,23 @@ out/
 tools/freq_corpus/fixtures/*
 !tools/freq_corpus/fixtures/ranking/
 
+# Local reference models and agent scratch (never committed)
+/quasar/
+/.qwen/
+
+# Local scratch notes, probe output and rig logs (not artifact or sources)
+/.local_changed.txt
+/.upstream_changed.txt
+/ngram_reverify.log.err
+/c3_wide_neural_SUMMARY.txt
+/c3_wide_neural_serve.log
+/ngram_c2_watcher.pid
+/ngram_c2_logs/
+/probe_*.png
+/vision_e2e_*.png
+/vision_e2e_serve.err
+/vision_e2e_serve.out
+
 # Editor / OS
 .vscode/
 .idea/
