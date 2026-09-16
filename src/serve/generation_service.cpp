@@ -247,6 +247,7 @@ GenerationService::GenerationService(ServeOptions options, StartupObserver start
     engine_options.vision_residency         = options_.vision_residency;
     engine_options.vision_max_merged_tokens = options_.vision_max_merged_tokens;
     engine_options.use_cuda_graph           = options_.use_cuda_graph;
+    engine_options.cuda_graph_allowance_bytes = options_.cuda_graph_allowance_mib << 20;
     engine_options.speculative              = options_.speculative;
     engine_options.context_cache            = options_.context_cache;
     engine_options.context_cost.preset_path = options_.context_cost_presets;

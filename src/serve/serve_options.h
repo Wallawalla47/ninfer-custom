@@ -54,6 +54,8 @@ struct ServeOptions {
     ninfer::VisionResidency vision_residency = ninfer::VisionResidency::Resident;
     std::uint32_t vision_max_merged_tokens   = 32768;
     bool use_cuda_graph     = true;
+    // Explicit total CUDA Graph driver-state allowance in MiB; 0 keeps the computed allowance.
+    std::uint64_t cuda_graph_allowance_mib = 0;
     bool allow_prefix_reuse = true;
     std::optional<bool> enable_thinking;
     std::optional<bool> preserve_thinking;

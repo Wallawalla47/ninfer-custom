@@ -804,6 +804,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
 | `--vision` | enable media input and load Vision GPU allocations | off |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
+| `--cuda-graph-allowance-mib N` | total CUDA Graph driver-state allowance in MiB, subtracted from the KV sizing budget | computed |
 | `--no-prefix-reuse` | disable compatible-prefix caching | prefix reuse on |
 | `--device-state-slots N` | extra Device checkpoint StateImages beyond the active-lane guarantee | `max-concurrency` |
 | `--host-state-slots N` | pinned Host StateImage capacity | `8` |
@@ -972,8 +973,11 @@ network serialization run outside the GPU executor and do not delay formation of
 
 `--max-context` is each sequence's logical ceiling. `--kv-capacity` fixes the shared Main Text KV
 pool used by active requests and retained prefixes. `auto` accounts for the complete enabled runtime
-and leaves 1 GiB of sizing headroom; omitting the option makes it follow `--max-context`. Capacity
-resolves once at startup.
+and leaves 1 GiB of sizing headroom; omitting the option makes it follow `--max-context`. The
+CUDA Graph driver-state allowance reserved against that budget is computed from the enabled
+graph profiles and concurrency unless `--cuda-graph-allowance-mib` supplies an explicit total; a
+too-small value risks CUDA out-of-memory at graph capture and a too-large one shrinks the KV pool.
+Capacity resolves once at startup.
 
 Admission reserves the full prompt-plus-effective-output page entitlement through request
 completion. A request remains queued until a legal resource plan can satisfy that entitlement.

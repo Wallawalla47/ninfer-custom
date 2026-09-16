@@ -83,7 +83,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--ngram-archive-mib N] [--ngram-session-mib N] [--ngram-native-sessions] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--vision-residency R] [--vision-max-merged N] "
-           "[--no-cuda-graph] [--no-prefix-reuse] "
+           "[--no-cuda-graph] [--cuda-graph-allowance-mib N] [--no-prefix-reuse] "
            "[--lm-head-draft] [--no-thinking] [--preserve-thinking] [--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
            "[--frequency-penalty F] [--seed N] [--greedy]\n"
@@ -113,6 +113,9 @@ std::string serve_usage_text(const char* argv0) {
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of sizing headroom\n"
            "       --no-prefix-reuse disables compatible-prefix caching (enabled by default)\n"
+           "       --cuda-graph-allowance-mib N overrides the total CUDA Graph driver-state "
+           "allowance in MiB, which is subtracted from the KV sizing budget; "
+           "0 keeps the computed per-profile allowance\n"
            "       context cache defaults: device-state=max-concurrency, private=2x concurrency, "
            "shared=max(max-concurrency,4), anchors=2; Host state=8 slots, Host KV=8192 MiB\n"
            "       --device-state-slots is extra checkpoint capacity beyond active lanes; "
@@ -346,6 +349,13 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.vision_max_merged_tokens = merged;
         } else if (arg == "--no-cuda-graph") {
             options.use_cuda_graph = false;
+        } else if (arg == "--cuda-graph-allowance-mib") {
+            const std::uint64_t mib =
+                parse_u64(require_value("--cuda-graph-allowance-mib"), "cuda-graph-allowance-mib");
+            if (mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--cuda-graph-allowance-mib is out of range");
+            }
+            options.cuda_graph_allowance_mib = mib;
         } else if (arg == "--no-prefix-reuse") {
             options.allow_prefix_reuse = false;
         } else if (arg == "--lm-head-draft") {
@@ -439,6 +449,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     }
     if (options.ngram_native_sessions && options.speculative.ngram_archive_bytes == 0) {
         throw std::invalid_argument("--ngram-native-sessions requires --ngram-archive-mib");
+    }
+    if (options.cuda_graph_allowance_mib != 0 && !options.use_cuda_graph) {
+        throw std::invalid_argument(
+            "--cuda-graph-allowance-mib requires CUDA graphs (omit --no-cuda-graph)");
     }
     if (default_max_tokens_explicit) {
         if (options.default_max_tokens <= 0) {
