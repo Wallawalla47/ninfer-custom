@@ -14,18 +14,30 @@ namespace loading {
 struct PendingWeight;
 }
 
-// Byte ranges of the vision groups inside the pinned weight block, used by the
-// overlay window to stage weights through borrowed device memory. Ranges are
-// contiguous by binding order; slot_bytes is the largest single layer range.
+// One contiguous run of pinned bytes staged into a group's device slot. The pinned offset is
+// the object's position in the pinned block; the staging offset is its position in the group's
+// device slot. A group's objects are not necessarily adjacent in the pinned block (the binder
+// packs pinned objects in registration order, and the converter stores the fused qkv separately
+// from each layer's other weights), so a group is a list of segments rather than one range.
+struct VisionOverlaySegment {
+    std::size_t pinned_offset  = 0;
+    std::size_t staging_offset = 0;
+    std::size_t bytes          = 0;
+};
+
+struct VisionOverlayGroup {
+    std::vector<VisionOverlaySegment> segments;
+    std::size_t bytes = 0;  // total staged bytes (sum of segment bytes)
+};
+
+// Byte layout of the vision groups inside the pinned weight block, used by the overlay window
+// to stage weights through borrowed device memory. slot_bytes is the largest single layer range.
 struct VisionOverlayLayout {
-    std::size_t prelude_begin = 0;   // patch embedding .. position embedding
-    std::size_t prelude_bytes = 0;
-    std::vector<std::size_t> layer_begin;
-    std::vector<std::size_t> layer_bytes;
-    std::size_t merger_begin  = 0;   // merger fc1 .. merger norm bias
-    std::size_t merger_bytes  = 0;
+    VisionOverlayGroup prelude;  // patch embedding .. position embedding
+    std::vector<VisionOverlayGroup> layers;
+    VisionOverlayGroup merger;   // merger fc1 .. merger norm bias
     std::size_t slot_bytes    = 0;
-    std::size_t staging_bytes = 0;   // prelude + merger + two layer slots, aligned
+    std::size_t staging_bytes = 0;  // prelude + merger + two layer slots, aligned
 };
 
 // Runtime assets the overlay window needs, published on the model when the engine runs

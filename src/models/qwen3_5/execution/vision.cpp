@@ -281,8 +281,10 @@ VisionWorkspacePlan VisionContext::plan_overlay_window(const VisionConfig& confi
     // Place the output handoff after the encode tensors so the borrowed lease never aliases
     // live activations; there is no general reservation in an overlay window.
     std::size_t encode_extent = 0;
-    (void)build_workspace_layout(config, parameters, max_patches, max_merged_tokens, 0,
-                                 &encode_extent);
+    // A zero handoff offset is rejected, and the encode extent is captured before the handoff
+    // region is laid out, so measure the encode tensors with an aligned placeholder offset.
+    (void)build_workspace_layout(config, parameters, max_patches, max_merged_tokens,
+                                 kWorkspaceAlignment, &encode_extent);
     const std::size_t handoff_offset = align_up(encode_extent, kWorkspaceAlignment,
                                                 "overlay handoff offset");
     const auto layout =

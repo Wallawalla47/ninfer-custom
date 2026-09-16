@@ -28,43 +28,47 @@ std::size_t staging_align(std::size_t bytes) {
     return (bytes + kAlign - 1) / kAlign * kAlign;
 }
 
-std::ptrdiff_t byte_delta(const std::byte* target, const std::byte* source) {
-    return target - source;
+// Rebase a pointer that lives inside a group's pinned bytes into the group's staged slot, using
+// the segment that contains it. A group's objects are not necessarily adjacent in the pinned
+// block, so each object is staged independently.
+const void* stage_pointer(const VisionOverlayGroup& group, std::byte* staging,
+                          const std::byte* block, const void* pointer) {
+    if (pointer == nullptr) { return nullptr; }
+    const std::size_t pinned =
+        static_cast<std::size_t>(static_cast<const std::byte*>(pointer) - block);
+    for (const VisionOverlaySegment& segment : group.segments) {
+        if (pinned >= segment.pinned_offset && pinned < segment.pinned_offset + segment.bytes) {
+            return staging + segment.staging_offset + (pinned - segment.pinned_offset);
+        }
+    }
+    throw std::logic_error("overlay weight is outside its staged group");
 }
 
-Tensor rebase(Tensor tensor, std::ptrdiff_t delta) {
-    tensor.data = static_cast<std::byte*>(tensor.data) + delta;
-    return tensor;
-}
-
-Weight rebase(Weight weight, std::ptrdiff_t delta) {
-    const auto shift = [delta](const void* pointer) -> const void* {
-        return pointer == nullptr
-                   ? nullptr
-                   : static_cast<const void*>(static_cast<const std::byte*>(pointer) + delta);
-    };
-    weight.payload = shift(weight.payload);
-    weight.qdata   = shift(weight.qdata);
-    weight.qhigh   = shift(weight.qhigh);
-    weight.scales  = shift(weight.scales);
-    return weight;
-}
-
-VisionBlockParameters rebase_layer(const VisionBlockParameters& source, std::ptrdiff_t delta) {
-    VisionBlockParameters out = source;
-    out.norm1.weight          = rebase(source.norm1.weight, delta);
-    out.norm1.bias            = rebase(source.norm1.bias, delta);
-    out.norm2.weight          = rebase(source.norm2.weight, delta);
-    out.norm2.bias            = rebase(source.norm2.bias, delta);
-    out.qkv.weight            = rebase(source.qkv.weight, delta);
-    out.qkv_bias              = rebase(source.qkv_bias, delta);
-    out.output.weight         = rebase(source.output.weight, delta);
-    out.output_bias           = rebase(source.output_bias, delta);
-    out.fc1.weight            = rebase(source.fc1.weight, delta);
-    out.fc1_bias              = rebase(source.fc1_bias, delta);
-    out.fc2.weight            = rebase(source.fc2.weight, delta);
-    out.fc2_bias              = rebase(source.fc2_bias, delta);
+Tensor stage_tensor(const VisionOverlayGroup& group, std::byte* staging, const std::byte* block,
+                    const Tensor& source) {
+    Tensor out = source;
+    out.data   = const_cast<std::byte*>(
+        static_cast<const std::byte*>(stage_pointer(group, staging, block, source.data)));
     return out;
+}
+
+Weight stage_weight(const VisionOverlayGroup& group, std::byte* staging, const std::byte* block,
+                    const Weight& source) {
+    Weight out   = source;
+    out.payload  = static_cast<const std::byte*>(stage_pointer(group, staging, block, source.payload));
+    out.qdata    = stage_pointer(group, staging, block, source.qdata);
+    out.qhigh    = stage_pointer(group, staging, block, source.qhigh);
+    out.scales   = stage_pointer(group, staging, block, source.scales);
+    return out;
+}
+
+// Copy a group's pinned segments into its device slot through the copy stream.
+void stage_group(cudaStream_t stream, std::byte* staging, const VisionOverlayGroup& group,
+                 const std::byte* block) {
+    for (const VisionOverlaySegment& segment : group.segments) {
+        CUDA_CHECK(cudaMemcpyAsync(staging + segment.staging_offset, block + segment.pinned_offset,
+                                   segment.bytes, cudaMemcpyHostToDevice, stream));
+    }
 }
 
 } // namespace overlay_detail
@@ -75,8 +79,8 @@ VisionWeightStream::VisionWeightStream(DeviceContext& device, const VisionOverla
     using overlay_detail::staging_align;
     const VisionOverlayLayout& layout = assets.layout;
     prelude_ = staging;
-    merger_  = prelude_ + staging_align(layout.prelude_bytes);
-    slot_[0] = merger_ + staging_align(layout.merger_bytes);
+    merger_  = prelude_ + staging_align(layout.prelude.bytes);
+    slot_[0] = merger_ + staging_align(layout.merger.bytes);
     slot_[1] = slot_[0] + staging_align(layout.slot_bytes);
     for (cudaEvent_t& event : uploaded_) {
         CUDA_CHECK(cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
@@ -86,13 +90,11 @@ VisionWeightStream::VisionWeightStream(DeviceContext& device, const VisionOverla
     CUDA_CHECK(cudaEventCreateWithFlags(&compute_fence_, cudaEventDisableTiming));
 
     const std::byte* block = assets.pinned_block;
-    CUDA_CHECK(cudaMemcpyAsync(prelude_, block + layout.prelude_begin, layout.prelude_bytes,
-                               cudaMemcpyHostToDevice, copy_stream()));
+    overlay_detail::stage_group(copy_stream(), prelude_, layout.prelude, block);
     CUDA_CHECK(cudaEventRecord(prelude_event_, copy_stream()));
-    CUDA_CHECK(cudaMemcpyAsync(merger_, block + layout.merger_begin, layout.merger_bytes,
-                               cudaMemcpyHostToDevice, copy_stream()));
+    overlay_detail::stage_group(copy_stream(), merger_, layout.merger, block);
     CUDA_CHECK(cudaEventRecord(merger_event_, copy_stream()));
-    upload_bytes_ = layout.prelude_bytes + layout.merger_bytes;
+    upload_bytes_ = layout.prelude.bytes + layout.merger.bytes;
     reset(device_.stream);
 }
 
@@ -105,29 +107,43 @@ VisionWeightStream::~VisionWeightStream() {
 }
 
 VisionParameters VisionWeightStream::window_weights(const VisionParameters& host) const {
-    using overlay_detail::byte_delta;
-    using overlay_detail::rebase;
-    using overlay_detail::rebase_layer;
+    using overlay_detail::stage_tensor;
+    using overlay_detail::stage_weight;
     const VisionOverlayLayout& layout = assets_.layout;
     const std::byte* block            = assets_.pinned_block;
+    const VisionOverlayGroup& prelude = layout.prelude;
+    const VisionOverlayGroup& merger  = layout.merger;
 
     VisionParameters out = host;
-    const std::ptrdiff_t prelude_delta = byte_delta(prelude_, block + layout.prelude_begin);
-    out.patch_embedding.weight = rebase(host.patch_embedding.weight, prelude_delta);
-    out.patch_embedding_bias   = rebase(host.patch_embedding_bias, prelude_delta);
-    out.position_embedding     = rebase(host.position_embedding, prelude_delta);
+    out.patch_embedding.weight =
+        stage_weight(prelude, prelude_, block, host.patch_embedding.weight);
+    out.patch_embedding_bias = stage_tensor(prelude, prelude_, block, host.patch_embedding_bias);
+    out.position_embedding   = stage_tensor(prelude, prelude_, block, host.position_embedding);
     for (std::size_t layer = 0; layer < host.layers.size(); ++layer) {
-        const std::ptrdiff_t delta =
-            byte_delta(slot_[layer % 2], block + layout.layer_begin[layer]);
-        out.layers[layer] = rebase_layer(host.layers[layer], delta);
+        const VisionOverlayGroup& group  = layout.layers[layer];
+        std::byte* staging               = slot_[layer % 2];
+        const VisionBlockParameters& src = host.layers[layer];
+        VisionBlockParameters dst        = src;
+        dst.norm1.weight  = stage_tensor(group, staging, block, src.norm1.weight);
+        dst.norm1.bias    = stage_tensor(group, staging, block, src.norm1.bias);
+        dst.norm2.weight  = stage_tensor(group, staging, block, src.norm2.weight);
+        dst.norm2.bias    = stage_tensor(group, staging, block, src.norm2.bias);
+        dst.qkv.weight    = stage_weight(group, staging, block, src.qkv.weight);
+        dst.qkv_bias      = stage_tensor(group, staging, block, src.qkv_bias);
+        dst.output.weight = stage_weight(group, staging, block, src.output.weight);
+        dst.output_bias   = stage_tensor(group, staging, block, src.output_bias);
+        dst.fc1.weight    = stage_weight(group, staging, block, src.fc1.weight);
+        dst.fc1_bias      = stage_tensor(group, staging, block, src.fc1_bias);
+        dst.fc2.weight    = stage_weight(group, staging, block, src.fc2.weight);
+        dst.fc2_bias      = stage_tensor(group, staging, block, src.fc2_bias);
+        out.layers[layer] = dst;
     }
-    const std::ptrdiff_t merger_delta = byte_delta(merger_, block + layout.merger_begin);
-    out.merger_norm.weight            = rebase(host.merger_norm.weight, merger_delta);
-    out.merger_norm.bias              = rebase(host.merger_norm.bias, merger_delta);
-    out.merger_fc1.weight             = rebase(host.merger_fc1.weight, merger_delta);
-    out.merger_fc1_bias               = rebase(host.merger_fc1_bias, merger_delta);
-    out.merger_fc2.weight             = rebase(host.merger_fc2.weight, merger_delta);
-    out.merger_fc2_bias               = rebase(host.merger_fc2_bias, merger_delta);
+    out.merger_norm.weight = stage_tensor(merger, merger_, block, host.merger_norm.weight);
+    out.merger_norm.bias   = stage_tensor(merger, merger_, block, host.merger_norm.bias);
+    out.merger_fc1.weight  = stage_weight(merger, merger_, block, host.merger_fc1.weight);
+    out.merger_fc1_bias    = stage_tensor(merger, merger_, block, host.merger_fc1_bias);
+    out.merger_fc2.weight  = stage_weight(merger, merger_, block, host.merger_fc2.weight);
+    out.merger_fc2_bias    = stage_tensor(merger, merger_, block, host.merger_fc2_bias);
     return out;
 }
 
@@ -149,7 +165,7 @@ void VisionWeightStream::merger_ready(cudaStream_t compute) {
 
 void VisionWeightStream::arrive(std::uint32_t layer, cudaStream_t compute) {
     CUDA_CHECK(cudaStreamWaitEvent(compute, uploaded_[layer % 2], 0));
-    const std::uint32_t layers = static_cast<std::uint32_t>(assets_.layout.layer_begin.size());
+    const std::uint32_t layers = static_cast<std::uint32_t>(assets_.layout.layers.size());
     if (next_upload_ == layer + 1 && next_upload_ < layers) {
         CUDA_CHECK(cudaEventRecord(compute_fence_, compute));
         CUDA_CHECK(cudaStreamWaitEvent(copy_stream(), compute_fence_, 0));
@@ -158,15 +174,12 @@ void VisionWeightStream::arrive(std::uint32_t layer, cudaStream_t compute) {
 }
 
 void VisionWeightStream::upload_next_layer() {
-    if (next_upload_ >= static_cast<std::uint32_t>(assets_.layout.layer_begin.size())) { return; }
-    const std::uint32_t layer = next_upload_++;
-    const VisionOverlayLayout& layout = assets_.layout;
-    CUDA_CHECK(cudaMemcpyAsync(slot_[layer % 2],
-                               assets_.pinned_block + layout.layer_begin[layer],
-                               layout.layer_bytes[layer], cudaMemcpyHostToDevice,
-                               copy_stream()));
+    if (next_upload_ >= static_cast<std::uint32_t>(assets_.layout.layers.size())) { return; }
+    const std::uint32_t layer       = next_upload_++;
+    const VisionOverlayGroup& group = assets_.layout.layers[layer];
+    overlay_detail::stage_group(copy_stream(), slot_[layer % 2], group, assets_.pinned_block);
     CUDA_CHECK(cudaEventRecord(uploaded_[layer % 2], copy_stream()));
-    upload_bytes_ += layout.layer_bytes[layer];
+    upload_bytes_ += group.bytes;
 }
 
 std::vector<PinnedVisionResult>
