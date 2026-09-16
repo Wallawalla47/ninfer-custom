@@ -617,11 +617,14 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
                             {0, static_cast<std::uint32_t>(frame.append_positions.ne[0])});
 
         if (state.ngram) {
-            if (batch_size != 1) { throw std::logic_error("ngram requires a C1 acceptance frame"); }
             const auto* ingress = static_cast<const std::byte*>(frame.ingress.data);
+            // Per-row proposal payload. The host arrays are column-major per row with the round's
+            // draft width (k), matching the frame's [k, batch] tensor stride, so one contiguous
+            // copy covers every active row.
             CUDA_CHECK(cudaMemcpyAsync(
                 frame.draft_tokens.data,
-                ingress + offsetof(qwen3_5::DFlashDecodeIngress, ngram_tokens), k * sizeof(TokenId),
+                ingress + offsetof(qwen3_5::DFlashDecodeIngress, ngram_tokens),
+                static_cast<std::size_t>(batch_size) * k * sizeof(TokenId),
                 cudaMemcpyDeviceToDevice, state.execution.device.stream));
             // DFlash keeps its deterministic-draft verifier and count publication contract.
             // DFlash2 represents the same deterministic proposal as a one-hot sparse law.
@@ -632,21 +635,30 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
                 CUDA_CHECK(cudaMemcpyAsync(
                     frame.candidate_ids.data,
                     ingress + offsetof(qwen3_5::DFlashDecodeIngress, ngram_candidates),
-                    k * ops::kSparseSpeculativeCandidates * sizeof(TokenId),
+                    static_cast<std::size_t>(batch_size) * k *
+                        ops::kSparseSpeculativeCandidates * sizeof(TokenId),
                     cudaMemcpyDeviceToDevice, state.execution.device.stream));
-                CUDA_CHECK(
-                    cudaMemcpyAsync(frame.proposal_q.data,
-                                    ingress + offsetof(qwen3_5::DFlashDecodeIngress, ngram_q),
-                                    k * ops::kSparseSpeculativeCandidates * sizeof(float),
-                                    cudaMemcpyDeviceToDevice, state.execution.device.stream));
+                CUDA_CHECK(cudaMemcpyAsync(
+                    frame.proposal_q.data,
+                    ingress + offsetof(qwen3_5::DFlashDecodeIngress, ngram_q),
+                    static_cast<std::size_t>(batch_size) * k * ops::kSparseSpeculativeCandidates *
+                        sizeof(float),
+                    cudaMemcpyDeviceToDevice, state.execution.device.stream));
             }
         } else {
             const auto proposal_k = state.neural_proposal_drafts;
             if (proposal_k == 0 || proposal_k > kDFlashDecodeMaximumDrafts || proposal_k > k) {
                 throw std::logic_error("neural proposal is outside its supported frame");
             }
-            auto proposal_frame = proposal_k == k ? frame : frame.single_row_prefix(proposal_k);
-            propose_batch_impl(state, proposal_frame, batch_size, proposal_k, envelopes);
+            if (frame.draft_tokens.ne[1] > 1 && k != proposal_k) {
+                // A batch>1 frame cannot be narrowed. Consume it at its native width (k): the
+                // verify extent still limits accepted drafts to the neural width, and the
+                // drafter's first proposal_k drafts are identical under a wider causal proposal.
+                propose_batch_impl(state, frame, batch_size, k, envelopes);
+            } else {
+                auto proposal_frame = proposal_k == k ? frame : frame.single_row_prefix(proposal_k);
+                propose_batch_impl(state, proposal_frame, batch_size, proposal_k, envelopes);
+            }
         }
         ops::speculative_prepare_verify_inputs(anchors, drafts, frontiers, extents, verify_ids,
                                                target_positions, state.execution.device.stream);

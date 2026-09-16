@@ -1164,8 +1164,11 @@ private:
                                        std::span<const std::uint32_t> counts);
     void validate_licensed_tokens(std::span<const TokenId> tokens) const;
     void mark_workspace_usage(std::size_t phase_bytes) noexcept;
-    [[nodiscard]] NgramProposer::Match propose_ngram(std::span<const std::uint32_t> lanes,
-                                                     std::span<const runtime::RoundBudget> budgets);
+    [[nodiscard]] std::vector<NgramProposer::Match>
+    propose_ngram(std::span<const std::uint32_t> lanes,
+                  std::span<const runtime::RoundBudget> budgets);
+    [[nodiscard]] NgramProposer::Match propose_ngram_one(std::uint32_t lane,
+                                                         const runtime::RoundBudget& budget);
     [[nodiscard]] runtime::BatchedGeneratedRound
     decode_ordinary_batch(std::span<const std::uint32_t> lanes,
                           std::span<const runtime::RoundBudget> budgets,
