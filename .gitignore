@@ -60,6 +60,7 @@ tools/freq_corpus/fixtures/*
 /.local_changed.txt
 /.upstream_changed.txt
 /ngram_reverify.log.err
+/old_c3_tests_SUMMARY.txt
 /c3_wide_neural_SUMMARY.txt
 /c3_wide_neural_serve.log
 /ngram_c2_watcher.pid
