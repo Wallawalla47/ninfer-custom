@@ -18,11 +18,16 @@ add_custom_target(ninfer_build_id_stamp ALL
           -DSRC_DIR=${CMAKE_SOURCE_DIR}
           -DOUT=${NINFER_BUILD_ID_HEADER}
           -P ${CMAKE_SOURCE_DIR}/cmake/GenerateBuildId.cmake
+  BYPRODUCTS ${NINFER_BUILD_ID_HEADER}
   COMMENT "Stamping NINFER build id from git (build-time)"
   VERBATIM)
 
 add_executable(ninfer-serve serve/main.cpp)
 add_dependencies(ninfer-serve ninfer_build_id_stamp)
+# List the generated header as a source so MSBuild treats it as a real input of this target and
+# recompiles main.cpp whenever the stamped id changes (the add_dependencies edge alone orders the
+# projects but does not make the header a tracked input).
+target_sources(ninfer-serve PRIVATE ${NINFER_BUILD_ID_HEADER})
 ninfer_internal_includes(ninfer-serve)
 target_include_directories(ninfer-serve PRIVATE
   ${PROJECT_SOURCE_DIR}/third_party
