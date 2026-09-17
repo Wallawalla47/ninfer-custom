@@ -1,4 +1,5 @@
 #include "core/weight.h"
+#include "core/device.h"
 #include "ninfer/ops/gdn_input_proj.h"
 
 #include "ops/input_projection_test_common.h"
@@ -71,6 +72,69 @@ int run_q4_q5_case(DevicePackedWeight& query_key, DevicePackedWeight& value_z_we
     return failures;
 }
 
+int run_q4_q5_graph_case(DevicePackedWeight& query_key, DevicePackedWeight& value_z_weight,
+                         std::int32_t tokens) {
+    constexpr std::int32_t kHidden    = 5120;
+    constexpr std::int32_t kQkRows    = 4096;
+    constexpr std::int32_t kValueRows = 6144;
+    constexpr std::int32_t kZRows     = 6144;
+    constexpr std::int32_t kRows      = kQkRows + kValueRows;
+
+    cudaStream_t stream = nullptr;
+    CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+
+    std::vector<float> activation = make_bf16_activation(kHidden, tokens, 701U + tokens);
+    std::vector<std::uint16_t> activation_bits = bf16_bits(activation);
+    DeviceBuffer device_activation             = to_device(activation_bits);
+    GuardedBf16Tensor qkv(kRows, tokens);
+    GuardedBf16Tensor z(kZRows, tokens);
+    Tensor x(device_activation.p, DType::BF16, {kHidden, tokens});
+    Tensor output     = qkv.tensor();
+    Tensor z_output   = z.tensor();
+    const auto launch = [&](cudaStream_t launch_stream) {
+        ops::gdn_input_proj(x, query_key.view(), value_z_weight.view(), output, z_output,
+                            launch_stream);
+    };
+    launch(stream);
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    cudaGraph_t graph          = nullptr;
+    cudaGraphExec_t executable = nullptr;
+    CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+    launch(stream);
+    CUDA_CHECK(cudaStreamEndCapture(stream, &graph));
+    CUDA_CHECK(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0));
+    CUDA_CHECK(cudaGraphLaunch(executable, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    // The same executable must consume the changed activation that now lives at the captured
+    // address: a graph that baked its operands would keep reporting the first input here.
+    activation      = make_bf16_activation(kHidden, tokens, 811U + tokens);
+    activation_bits = bf16_bits(activation);
+    CUDA_CHECK(cudaMemcpyAsync(device_activation.p, activation_bits.data(),
+                               activation_bits.size() * sizeof(std::uint16_t),
+                               cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaGraphLaunch(executable, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    CUDA_CHECK(cudaGraphExecDestroy(executable));
+    CUDA_CHECK(cudaGraphDestroy(graph));
+    CUDA_CHECK(cudaStreamDestroy(stream));
+
+    const std::string suffix = " Q4/Q5 A16 graph T=" + std::to_string(tokens);
+    int failures             = qkv.verify_guards("gdn qkv" + suffix);
+    failures += z.verify_guards("gdn z" + suffix);
+    failures += qkv.verify_fully_written("gdn qkv" + suffix);
+    failures += z.verify_fully_written("gdn z" + suffix);
+    failures += verify_output_range("gdn qk" + suffix, qkv, kRows, 0, kQkRows, query_key.host, 0,
+                                    activation, kHidden, tokens);
+    failures += verify_output_range("gdn value" + suffix, qkv, kRows, kQkRows, kValueRows,
+                                    value_z_weight.host, 0, activation, kHidden, tokens);
+    failures += verify_output_range("gdn z" + suffix, z, kZRows, 0, kZRows, value_z_weight.host,
+                                    kValueRows, activation, kHidden, tokens);
+    failures += query_key.verify_preserved("gdn query/key weight" + suffix);
+    failures += value_z_weight.verify_preserved("gdn value/z weight" + suffix);
+    return failures;
+}
+
 int run_q4_q5() {
     constexpr std::int32_t kHidden = 5120;
     DevicePackedWeight query_key(
@@ -78,8 +142,15 @@ int run_q4_q5() {
     DevicePackedWeight value_z_weight(
         quantized_weight::make_patterned_weight(QType::Q5_G64_FP16, 12288, kHidden, 419U));
     int failures = 0;
-    for (const std::int32_t tokens : {1, 2, 16, 17}) {
+    // Every route boundary and both of its neighbours: the Q4/Q5 column catalog hands 1..8 to the
+    // small-T direct kernels, 9..32 to the 32x32 tile, 33..64 to the 32x64 tile, and 65 upward to
+    // the 64x128 tile that also supplies the 128-column tail slices.
+    for (const std::int32_t tokens : {1, 2, 8, 9, 15, 16, 17, 32, 33, 64, 65, 127, 128, 129, 193}) {
         failures += run_q4_q5_case(query_key, value_z_weight, tokens);
+    }
+    // One captured replay per route, including a 128-column tail slice (129 = 128 + 1).
+    for (const std::int32_t tokens : {9, 33, 65, 129}) {
+        failures += run_q4_q5_graph_case(query_key, value_z_weight, tokens);
     }
     return failures;
 }
