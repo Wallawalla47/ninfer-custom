@@ -24,6 +24,11 @@ struct ContextPortfolioCheckpointValue {
     std::uint64_t rebuild_ns           = 0;
     std::uint64_t baseline_recovery_ns = 0;
     std::uint64_t target_recovery_ns   = 0;
+    // SLRU protection: a checkpoint with at least two historical hits carries this floor in
+    // its owner's transition loss when a plan destroys its recovery value entirely (target
+    // recovery degrades to a full rebuild), so destroying it always costs more than destroying
+    // an unprotected checkpoint of the same value. Demotion keeps the value and pays no floor.
+    std::uint64_t protected_value_ns = 0;
 };
 
 struct ContextPortfolioValueResult {
@@ -43,6 +48,7 @@ public:
     [[nodiscard]] ContextPortfolioValueResult
     fold(std::span<const ContextPortfolioOwnerPolicy> owners,
          std::span<const ContextPortfolioCheckpointValue> checkpoints) {
+        ContextPortfolioValueResult result;
         std::array<std::uint64_t, 32> baseline_demand{};
         std::array<std::uint64_t, 32> target_demand{};
         owner_scratch_.clear();
@@ -75,9 +81,13 @@ public:
                     : 0;
             owner->baseline_best = std::max(owner->baseline_best, baseline_saving);
             owner->target_best   = std::max(owner->target_best, target_saving);
+            std::uint64_t transition_loss =
+                baseline_saving > target_saving ? baseline_saving - target_saving : 0;
+            if (checkpoint.protected_value_ns != 0 && target_saving == 0) {
+                add(transition_loss, checkpoint.protected_value_ns, result.saturated);
+            }
             owner->private_transition_loss =
-                std::max(owner->private_transition_loss,
-                         baseline_saving > target_saving ? baseline_saving - target_saving : 0);
+                std::max(owner->private_transition_loss, transition_loss);
             for (std::uint32_t bit = 0; bit < 32U; ++bit) {
                 if ((checkpoint.demand_mask & (1U << bit)) == 0) { continue; }
                 baseline_demand[bit] = std::max(baseline_demand[bit], baseline_saving);
@@ -85,7 +95,6 @@ public:
             }
         }
 
-        ContextPortfolioValueResult result;
         for (std::size_t bit = 0; bit < baseline_demand.size(); ++bit) {
             add(result.baseline_public_value, baseline_demand[bit], result.saturated);
             add(result.target_public_value, target_demand[bit], result.saturated);

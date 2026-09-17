@@ -28,6 +28,7 @@ struct MaterializationCheckpointPolicy {
     std::uint32_t demand_mask          = 0;
     std::uint64_t rebuild_ns           = 0;
     std::uint64_t baseline_recovery_ns = 0;
+    std::uint64_t protected_value_ns   = 0;
 };
 
 struct MaterializationOwnerPolicy {
@@ -1080,7 +1081,8 @@ private:
                  .demand_mask          = checkpoint.demand_mask,
                  .rebuild_ns           = checkpoint.rebuild_ns,
                  .baseline_recovery_ns = checkpoint.baseline_recovery_ns,
-                 .target_recovery_ns   = recovery});
+                 .target_recovery_ns   = recovery,
+                 .protected_value_ns   = checkpoint.protected_value_ns});
         }
         const auto value =
             portfolio_value_.fold(portfolio_owner_scratch_, portfolio_checkpoint_scratch_);
@@ -1171,6 +1173,7 @@ private:
                 .rebuild_ns           = policy.rebuild_ns,
                 .baseline_recovery_ns = policy.baseline_recovery_ns,
                 .target_recovery_ns   = target_recovery,
+                .protected_value_ns   = policy.protected_value_ns,
             });
             if (target_recovery > policy.baseline_recovery_ns) {
                 portfolio_degraded = true;

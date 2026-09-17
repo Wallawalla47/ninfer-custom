@@ -1973,6 +1973,125 @@ void test_portfolio_demand_and_owner_aggregation() {
     }
 }
 
+void test_portfolio_protected_checkpoint_eviction_floor() {
+    using ninfer::runtime::ContextPortfolioCheckpointValue;
+    using ninfer::runtime::ContextPortfolioOwnerPolicy;
+    using ninfer::runtime::ContextPortfolioValue;
+
+    const std::array owners{
+        ContextPortfolioOwnerPolicy{.owner                    = PlanningOwnerId{.value = 0},
+                                    .private_retention_weight = 4},
+        ContextPortfolioOwnerPolicy{.owner                    = PlanningOwnerId{.value = 1},
+                                    .private_retention_weight = 4},
+    };
+    const auto checkpoint = [](std::uint32_t owner, std::uint64_t target_recovery,
+                               std::uint64_t protected_value) {
+        return ContextPortfolioCheckpointValue{
+            .owner                = PlanningOwnerId{.value = owner},
+            .rebuild_ns           = 1000,
+            .baseline_recovery_ns = 100,
+            .target_recovery_ns   = target_recovery,
+            .protected_value_ns   = protected_value,
+        };
+    };
+    const auto fold = [&](const auto& first, const auto& second) {
+        const std::array checkpoints{first, second};
+        ContextPortfolioValue value;
+        return value.fold(owners, checkpoints);
+    };
+
+    const auto demoted = fold(checkpoint(0, 200, 900), checkpoint(1, 100, 0));
+    require(demoted.private_transition_loss == 400 && demoted.baseline_public_value == 0 &&
+                demoted.target_public_value == 0 && !demoted.saturated,
+            "demoting a protected checkpoint paid the destruction floor");
+
+    const auto evicted_unprotected = fold(checkpoint(0, 100, 0), checkpoint(1, 1000, 0));
+    require(evicted_unprotected.private_transition_loss == 3600,
+            "unprotected eviction did not cost the checkpoint's recovery value");
+
+    const auto evicted_protected = fold(checkpoint(0, 100, 0), checkpoint(1, 1000, 900));
+    require(evicted_protected.private_transition_loss == 7200,
+            "protected eviction did not pay the destruction floor on top of its value");
+
+    require(evicted_unprotected.private_transition_loss < evicted_protected.private_transition_loss,
+            "the protected checkpoint did not rank behind the unprotected eviction");
+}
+
+void test_planner_evicts_unprotected_idle_owner_before_protected() {
+    using Planner = ninfer::runtime::MaterializationPlanner<FakeModelContract>;
+    constexpr std::uint64_t ms = 1'000'000;
+
+    FakeProgram program;
+    program.required_pressure_actions       = 4;
+    program.eviction_pressure_action_units  = 4;
+    // An evicted checkpoint's recovery prices at a full rebuild, so the portfolio fold
+    // destroys its value (target saving zero) and the protection floor engages.
+    program.pressure_checkpoint_recovery_ns = 1'000 * ms;
+    std::array<FakeContinuationHandle, 2> handles;
+    std::array<const FakeContinuationHandle*, 2> owners;
+    std::array<PlanningOwnerId, 2> ids;
+    std::array<ninfer::runtime::MaterializationOwnerPolicy, 2> policies;
+    std::array<ninfer::runtime::MaterializationCheckpointPolicy, 2> checkpoints;
+    const std::array<std::uint64_t, 2> rebuild{100 * ms, 150 * ms};
+    for (unsigned i = 0; i < 2; ++i) {
+        handles[i] = FakeContinuationHandle{i + 1, 0};
+        owners[i]  = &handles[i];
+        ids[i]     = {.value = i};
+        policies[i] = {.owner                = ids[i],
+                       .selected_hit_count   = i == 0 ? 2U : 1U,
+                       .private_retention_weight = 4};
+        checkpoints[i] = {.owner              = ids[i],
+                          .checkpoint         = {.kind     = CheckpointKind::SessionEndpoint,
+                                                  .frontier = 16,
+                                                  .ordinal  = 0},
+                          .selected_hit_count = i == 0 ? 2U : 1U,
+                          .rebuild_ns         = rebuild[i],
+                          .protected_value_ns = i == 0 ? rebuild[i] : 0};
+        program.owner_decisions.push_back({
+            i + 1,
+            {{.id             = 1000 + i,
+              .immediate_ns   = 0},
+             {.id                  = 2000 + i,
+              .immediate_ns        = 0,
+              .degradation_units   = 4,
+              .dropped_checkpoints = 1,
+              .evicts_continuation = true}}});
+    }
+    FakeAdmissionCandidate root;
+    set_fake_machine_costs(root.identity.machine_work, 100 * ms, 100 * ms);
+    root.identity.physical_status =
+        ninfer::runtime::MaterializationPhysicalStatus::Infeasible;
+    root.identity.expandable = true;
+    const std::array candidates{
+        Planner::CandidateInput{.candidate = &root, .id = {.value = 0}}};
+    const auto inputs = [&]() -> Planner::PressureInputs {
+        return {.private_owners    = owners,
+                .private_owner_ids = ids,
+                .owner_policy      = policies,
+                .checkpoint_policy = checkpoints};
+    };
+    const auto goal = [&](PlanningCandidateId, PrivateSourceMode,
+                          std::span<const ninfer::runtime::PressureOwnerOutcome>)
+                          -> std::optional<Planner::LogicalGoal> {
+        return Planner::LogicalGoal{.publication_slot = 0};
+    };
+
+    Planner planner;
+    auto allowance     = ninfer::runtime::PlanningAllowance::boundary(0);
+    allowance.limit_ns = 5 * ms;
+    auto result =
+        planner.plan(program, FakePreparedPrompt{}, test_cost_model(), candidates, 0, inputs, goal,
+                     Planner::Clock::now(), allowance);
+    require(result && result->plan, "pressure search produced no plan for the protected fixture");
+    // Evicting the protected owner costs 4 x (100 + 100) ms; the unprotected owner costs
+    // 4 x 150 ms, so the search must keep the protected checkpoint intact.
+    require(result->diagnostics.predicted_total_ns == 700 * ms,
+            "planner did not price the protected floor into the eviction choice");
+    require(result->plan->private_planning_ids.size() == 1 &&
+                result->plan->private_planning_ids.front() == PlanningOwnerId{.value = 1},
+            "planner evicted the protected checkpoint before the unprotected one");
+}
+
 void test_shared_capture_subtracts_private_transition_loss() {
     using Planner = ninfer::runtime::SharedCapturePlanner<FakeModelContract>;
 
@@ -3565,6 +3684,10 @@ int main() {
     run_test("private checkpoint identity loss",
              test_private_portfolio_loss_keeps_checkpoint_identity_fixed);
     run_test("portfolio demand and owner aggregation", test_portfolio_demand_and_owner_aggregation);
+    run_test("portfolio protected eviction floor",
+             test_portfolio_protected_checkpoint_eviction_floor);
+    run_test("planner eviction protection ordering",
+             test_planner_evicts_unprotected_idle_owner_before_protected);
     run_test("shared capture private transition loss",
              test_shared_capture_subtracts_private_transition_loss);
     run_test("shared capture committed target budget",
