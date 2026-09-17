@@ -16,17 +16,13 @@ the "Upstream README" heading.
   `src/models` layout, which replaced the `src/targets` layout the PR was written for.
 - **PR #197** — honour `ignore_eos` on chat completions, by
   [Thireus](https://github.com/Thireus).
-- **PR #255** — widen the Q5 routed-down Rows2 window to its measured crossover, by
-  [Michael Dementii](https://github.com/MichaelDementii).
-- **PR #257** — choose the predicated Q8 GEMM cache policy instead of inheriting it, by
-  Michael Dementii.
-- **PR #262** — retune the Q4 34816×5120 LinearSwiGLu dispatch around the #261 linear
-  routes, by [Minnnn](https://github.com/Minnnn).
-- **PR #264** — take a partial last M tile in the fused SwiGLU TMA route, by Michael
-  Dementii (merged with the local Windows descriptor-staging path retained).
-- **PR #266** — tune the q5 a16 linear and residual projection routes, by Minnnn.
 - **PR #268** — fold the sigmoid gate into the causal reduce epilogue, by Michael
   Dementii.
+
+Pull requests #255, #257, #262, #264, and #266 — merged into this branch while it was
+being assembled — have since landed in upstream `master`, so they are no longer changes in
+this build. For PR #264 the local Windows TMA descriptor-staging adaptation is still
+applied on top (see Platform below); the rest are upstream text verbatim.
 
 Recurring merges from upstream `master` additionally bring in ongoing kernel and build
 work: NVFP4/Q8/sparse-MoE dispatch tuning, whole-tile W4A4 TMA scale routing, the real
@@ -125,7 +121,7 @@ well, and for the work this branch builds on.
 
 Everything below is a **direct, unmodified copy of the upstream
 [NInfer README](https://github.com/Neroued/ninfer/blob/master/README.md)**, as of the
-latest upstream sync (`5b4303c0` on `origin/master`).
+latest upstream sync (`f76e19c0` on `origin/master`).
 
 # NInfer
 
