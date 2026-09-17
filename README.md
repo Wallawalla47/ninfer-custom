@@ -1,5 +1,10 @@
 # NInfer — local fork
 
+> **AI disclaimer:** Everything added to this fork — the local features and this README
+> included — has been written with AI (mostly Qwen3.8-27B running on NInfer, with a few
+> other AI systems as well), so it is likely to be neither complete nor entirely
+> accurate. This is simply hobby development.
+
 This repository is a personal fork of [Neroued/ninfer](https://github.com/Neroued/ninfer),
 maintained on the branch `port/local-features-2026-09-15`. It tracks upstream while adding
 local features on top. This section summarises, in high terms, everything merged in from
