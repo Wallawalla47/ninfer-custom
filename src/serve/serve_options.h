@@ -61,6 +61,9 @@ struct ServeOptions {
     std::optional<bool> enable_thinking;
     std::optional<bool> preserve_thinking;
     std::optional<std::uint32_t> default_thinking_budget;
+    // End-of-thinking message fed to the model when it hits the thinking budget; empty
+    // preserves the model's built-in control suffix.
+    std::string thinking_budget_message;
     int default_max_tokens = kDefaultMaxTokens;
     bool enable_cors       = false; // send permissive CORS headers for browser UIs
     bool log_colours       = false; // --log-colours on|off: colour the console stats lines
