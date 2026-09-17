@@ -67,6 +67,14 @@ std::span<const std::byte> ReadOnlyFile::mapped_bytes() const noexcept {
     return {impl_->data, impl_->size};
 }
 
+std::uint64_t ReadOnlyFile::current_bytes() const noexcept {
+    struct stat status{};
+    if (::fstat(impl_->fd, &status) != 0 || status.st_size < 0) {
+        return impl_->size;
+    }
+    return static_cast<std::uint64_t>(status.st_size);
+}
+
 std::size_t ReadOnlyFile::read_direct(std::uint64_t offset,
                                       std::span<std::byte> destination) const {
     if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max()) ||

@@ -30,8 +30,14 @@ struct ReadOnlyFile::Impl {
     std::size_t size      = 0;
 
     explicit Impl(const std::filesystem::path& path) {
-        mapping_file = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        // A read-only consumer imposes the loosest sharing: POSIX open and unlink are always
+        // permissive, so a mapped artifact must not block re-reading or replacement (for
+        // example swapping in a new .ninfer while a server still has it mapped). Reads still
+        // observe the live size (see current_bytes). A mapped file still cannot be truncated
+        // or resized (ERROR_USER_MAPPED_FILE); callers must close the mapping first.
+        mapping_file = ::CreateFileW(path.c_str(), GENERIC_READ,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                     nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (mapping_file == INVALID_HANDLE_VALUE) {
             throw std::system_error(static_cast<int>(::GetLastError()), std::system_category(),
                                     "CreateFileW " + path.string());
@@ -72,7 +78,9 @@ struct ReadOnlyFile::Impl {
         }
 
         direct_file =
-            ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+            ::CreateFileW(path.c_str(), GENERIC_READ,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                          OPEN_EXISTING,
                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED |
                               FILE_FLAG_SEQUENTIAL_SCAN,
                           nullptr);
@@ -104,6 +112,14 @@ ReadOnlyFile& ReadOnlyFile::operator=(ReadOnlyFile&&) noexcept = default;
 
 std::span<const std::byte> ReadOnlyFile::mapped_bytes() const noexcept {
     return {impl_->data, impl_->size};
+}
+
+std::uint64_t ReadOnlyFile::current_bytes() const noexcept {
+    LARGE_INTEGER size{};
+    if (!::GetFileSizeEx(impl_->mapping_file, &size) || size.QuadPart < 0) {
+        return impl_->size;
+    }
+    return static_cast<std::uint64_t>(size.QuadPart);
 }
 
 std::size_t ReadOnlyFile::read_direct(std::uint64_t offset,

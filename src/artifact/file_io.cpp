@@ -30,6 +30,16 @@ off_t file_offset(std::uint64_t offset) {
     }
     return static_cast<off_t>(offset);
 }
+#else
+// The shared ReadOnlyFile abstraction reports platform failures as std::system_error; the
+// artifact layer promises ArtifactError, mirroring the POSIX "path: open: ..." message.
+ReadOnlyFile open_read_only(const std::filesystem::path& path) {
+    try {
+        return ReadOnlyFile(path);
+    } catch (const std::exception& error) {
+        throw ArtifactError(error.what());
+    }
+}
 #endif
 
 } // namespace
@@ -37,7 +47,8 @@ off_t file_offset(std::uint64_t offset) {
 #ifdef _WIN32
 // The Win32 path delegates to the shared read-only file abstraction (memory-mapped reads plus
 // an unbuffered handle for direct I/O); the POSIX path keeps positional pread on a raw fd.
-InputFile::InputFile(std::filesystem::path path) : path_(path), file_(path) {
+InputFile::InputFile(std::filesystem::path path)
+    : path_(std::move(path)), file_(open_read_only(path_)) {
     bytes_ = static_cast<std::uint64_t>(file_.mapped_bytes().size());
 }
 #endif
@@ -77,6 +88,12 @@ void InputFile::read_exact(std::uint64_t offset, std::span<std::byte> destinatio
         throw ArtifactError(path_.string() + ": read exceeds file length");
     }
 #ifdef _WIN32
+    // The mapped view keeps the size observed at open; a file truncated after open must still
+    // reject reads past its current end, as the POSIX short read below does.
+    const auto limit = std::min(bytes_, file_.current_bytes());
+    if (offset > limit || destination.size() > limit - offset) {
+        throw ArtifactError(path_.string() + ": read exceeds file length");
+    }
     const auto mapped = file_.mapped_bytes();
     std::copy_n(mapped.data() + offset, destination.size(), destination.data());
 #else

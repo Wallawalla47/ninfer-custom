@@ -19,6 +19,9 @@ public:
     ReadOnlyFile& operator=(const ReadOnlyFile&) = delete;
 
     std::span<const std::byte> mapped_bytes() const noexcept;
+    // Size of the file on disk now; external truncation or extension after open is observed,
+    // matching the short-read behavior of positional pread on POSIX.
+    [[nodiscard]] std::uint64_t current_bytes() const noexcept;
     std::size_t read_direct(std::uint64_t offset, std::span<std::byte> destination) const;
 
 private:
