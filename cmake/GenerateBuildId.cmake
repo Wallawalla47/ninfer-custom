@@ -10,7 +10,7 @@
 # is only rewritten when its content changes, so main.cpp recompiles only when the
 # id actually changes (no needless churn on every build).
 
-if(DEFINED ENV{NINFER_BUILD_ID})
+if(ENV{NINFER_BUILD_ID})
   set(_id "$ENV{NINFER_BUILD_ID}")
 else()
   find_program(_git_executable git)
@@ -24,6 +24,11 @@ else()
   endif()
   if(NOT _id)
     set(_id "unknown")
+    # A build that cannot record its real identity must not pass silently: the
+    # startup log would otherwise show "build unknown" for a real binary.
+    message(WARNING "NINFER build id unavailable (git missing or not a repository) -- "
+                    "the startup log will record 'build unknown'. Rebuild from a git "
+                    "checkout (or set NINFER_BUILD_ID) to record the real id.")
   endif()
 endif()
 

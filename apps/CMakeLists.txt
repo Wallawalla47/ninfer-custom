@@ -6,12 +6,17 @@ target_link_libraries(ninfer PRIVATE
   ninfer_engine
   ninfer_product_logging
   ninfer_product_prompt_input)
+add_dependencies(ninfer ninfer_build_id_stamp)
+target_sources(ninfer PRIVATE ${NINFER_BUILD_ID_HEADER})
+target_include_directories(ninfer PRIVATE ${CMAKE_BINARY_DIR}/generated)
 ninfer_stage_runtime_dlls(ninfer)
 
 # Build id is stamped at BUILD time (see cmake/GenerateBuildId.cmake) into a
 # generated header, so it always reflects the tree actually being compiled -- not
-# a stale configure-time value. The header is only rewritten when its content
-# changes, so main.cpp recompiles only when the id actually changes.
+# a stale configure-time value. Every product binary records it in its startup
+# log ("build <id>"); stamping one target stamps the shared header all of them
+# use. The header is only rewritten when its content changes, so each main.cpp
+# recompiles only when the id actually changes.
 set(NINFER_BUILD_ID_HEADER "${CMAKE_BINARY_DIR}/generated/ninfer_build_id.h")
 add_custom_target(ninfer_build_id_stamp ALL
   COMMAND ${CMAKE_COMMAND}
@@ -43,7 +48,10 @@ add_executable(ninfer-perplexity
 ninfer_internal_includes(ninfer-perplexity)
 target_include_directories(ninfer-perplexity PRIVATE
   ${PROJECT_SOURCE_DIR}/third_party
-  ${CMAKE_CURRENT_SOURCE_DIR}/perplexity)
+  ${CMAKE_CURRENT_SOURCE_DIR}/perplexity
+  ${CMAKE_BINARY_DIR}/generated)
 target_link_libraries(ninfer-perplexity PRIVATE
   ninfer_engine ninfer_product_logging ninfer::json)
+add_dependencies(ninfer-perplexity ninfer_build_id_stamp)
+target_sources(ninfer-perplexity PRIVATE ${NINFER_BUILD_ID_HEADER})
 ninfer_stage_runtime_dlls(ninfer-perplexity)
