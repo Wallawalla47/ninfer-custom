@@ -184,9 +184,20 @@ __device__ __forceinline__ void nvfp4_tma_load_2d(void* destination, const CUten
 template <class Geometry, class Schedule, class Epilogue, class OutputPolicy>
 __global__
 __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_w4a4_tma_kernel(
+#ifdef _WIN32
+    // MSVC cannot pass the over-aligned (alignas(128)) CUtensorMap struct by value as a
+    // __grid_constant__ parameter (C2719), so on Windows the descriptors are pointer-passed: the
+    // launcher stages them into a stream-owned device buffer and this kernel reads them from
+    // global memory. The epilogue/output keep ordinary by-value passing because a grid-constant
+    // struct holding a sub-8-byte member (the contiguous output's int32 stride) mis-packs.
+    const Nvfp4W4a4TmaDescriptors* descriptors_pointer, float alpha, const Epilogue epilogue,
+    const OutputPolicy output, int token_count
+#else
     const __grid_constant__ Nvfp4W4a4TmaDescriptors descriptors, float alpha,
     const __grid_constant__ Epilogue epilogue, const __grid_constant__ OutputPolicy output,
-    int token_count) {
+    int token_count
+#endif
+    ) {
     static_assert((Geometry::kInputRows % Schedule::kBlockK) == 0);
     static_assert((Geometry::kOutputRows % Schedule::kBlockN) == 0);
     static_assert(Schedule::kStages >= 2, "the activation-scale buffer needs two slots");
@@ -198,6 +209,15 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_w4a4
     nvfp4_tma_raster_blocks(block_x, block_y);
     const int token_begin = block_y * Schedule::kBlockM;
     const int row_begin   = block_x * Schedule::kBlockN;
+
+#ifdef _WIN32
+    // The descriptors are staged into a stream-owned device buffer by the launcher (global
+    // memory). On the non-Windows path they are __grid_constant__ (constant memory), which the
+    // TMA (tensormap) proxy reads coherently for free; a global-memory tensormap written by the
+    // generic proxy (the launcher's cudaMemcpy) is not, until it is made visible. The producer
+    // (thread 0) issues the acquire once, before its first cp.async.bulk.tensor.
+    const Nvfp4W4a4TmaDescriptors& descriptors = *descriptors_pointer;
+#endif
 
     if (threadIdx.x == 0) {
 #pragma unroll
@@ -216,6 +236,21 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_w4a4
             asm volatile("setmaxnreg.dec.sync.aligned.u32 40;" : : : "memory");
         }
         if (threadIdx.x == 0) {
+#ifdef _WIN32
+            // The descriptors are staged into global memory by the launcher (written by the
+            // generic proxy via cudaMemcpy); make them visible to the TMA (tensormap) proxy
+            // before the first cp.async.bulk.tensor. The non-Windows __grid_constant__ path is
+            // in constant memory, which the tensormap proxy reads coherently for free.
+            constexpr int kDescriptorWords =
+                static_cast<int>(sizeof(Nvfp4W4a4TmaDescriptors) / sizeof(std::uint32_t));
+            asm volatile("fence.proxy.tensormap::generic.acquire.sys [%0], %1;"
+                         :
+                         : "l"(descriptors_pointer), "n"(kDescriptorWords)
+                         : "memory");
+            // The activation codes/scales are produced by the quantize kernel (generic proxy);
+            // make those global writes visible to the TMA (async) proxy that reads them.
+            asm volatile("fence.proxy.async.global;" : : : "memory");
+#endif
 #pragma unroll 1
             for (int k_tile = 0; k_tile < kKTiles; ++k_tile) {
                 const int stage                 = k_tile % Schedule::kStages;
