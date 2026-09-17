@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 import json
 import time
@@ -31,6 +32,7 @@ from tools.artifact.tensor_output import TensorOutput
 from tools.artifact.writer import ArtifactWriter, DEFAULT_MAX_FILE_BYTES
 from tools.convert.methods import cast_direct, grouped_absmax, import_encoded
 from tools.convert.pipeline import _json_default
+from tools.convert.proposal import DEFAULT_RANKING, add_official_proposal
 from tools.convert.qwen3_5 import build_model
 from tools.convert.recipe import Recipe
 from tools.convert.sources.safetensors import SafetensorsSource
@@ -165,6 +167,27 @@ def _collect_dflash2(official: Artifact) -> dict:
     }
 
 
+def _add_dflash2_head_uses(recipe, params) -> None:
+    """Declare the grafted dflash2 component's uses of the shared heads.
+
+    The dflash2 byte-clone above only carries uses for ``dflash2/*``
+    parameters; its final projection consumes ``text/output_head`` (and,
+    when a proposal head is present, ``proposal/head``) through the
+    ``dflash2/final_hidden`` input. Without these Use entries the engine
+    fails planning with ``missing Use text/output_head@dflash2/final_hidden``.
+    The policies match the reference artifact's declarations.
+    """
+    for name, policy in (("text/output_head", "AllowA8"),
+                         ("proposal/head", "A16Only")):
+        if name not in params:
+            continue
+        param = params[name]
+        if "dflash2/final_hidden" not in param.inputs:
+            params[name] = replace(
+                param, inputs=param.inputs + ("dflash2/final_hidden",))
+            recipe.policies[(name, "dflash2/final_hidden")] = policy
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True, help="QUASAR safetensors directory")
@@ -185,6 +208,13 @@ def main() -> None:
         ),
     )
     parser.add_argument("--name", default="qwen3.8-27b-quasar")
+    parser.add_argument(
+        "--proposal",
+        action="store_true",
+        help="include the indexed proposal head (--lm-head-draft support)",
+    )
+    parser.add_argument("--proposal-rows", type=int, default=131072)
+    parser.add_argument("--ranking", type=Path, default=DEFAULT_RANKING)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--rows-per-chunk", type=int, default=512)
     parser.add_argument(
@@ -202,6 +232,10 @@ def main() -> None:
     model = build_model(base, components=("text", "vision", "mtp"))
     recipe = Recipe(model)
     apply_quasar_recipe(model, recipe, {"quantized": base}, args.q8_scope)
+    if args.proposal:
+        add_official_proposal(
+            recipe, ranking=args.ranking, rows=args.proposal_rows)
+    _add_dflash2_head_uses(recipe, model.parameters)
     prepared = recipe.prepare(device=args.device, rows_per_chunk=args.rows_per_chunk)
 
     # Read the grafted dflash2 payload while the reference is still open.
@@ -240,6 +274,14 @@ def main() -> None:
             "dflash2 grafted verbatim" % args.q8_scope
         ),
     }
+    if args.proposal:
+        provenance["proposal"] = {
+            "rows": args.proposal_rows,
+            "ranking": str(args.ranking),
+            "method": ("indexed proposal head gathered from the QUASAR output "
+                       "head, grouped_absmax; dflash2/final_hidden head uses "
+                       "declared for the grafted dflash2 component"),
+        }
 
     report = {
         "components": components,
