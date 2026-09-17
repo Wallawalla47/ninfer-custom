@@ -45,12 +45,13 @@ struct Nvfp4LinearSwiGluTmaSharedStorage {
 template <class Geometry, class Schedule>
 __global__ __launch_bounds__(
     Schedule::kThreads,
-    Schedule::
-        kMinBlocksPerSm) void nvfp4_linear_swiglu_w4a4_tma_kernel(const __grid_constant__
-                                                                      Nvfp4W4a4TmaDescriptors
-                                                                          descriptors,
-                                                                  float alpha,
-                                                                  __nv_bfloat16* __restrict__ output) {
+    Schedule::kMinBlocksPerSm) void nvfp4_linear_swiglu_w4a4_tma_kernel(
+#ifdef _WIN32
+    const Nvfp4W4a4TmaDescriptors* descriptors_pointer,
+#else
+    const __grid_constant__ Nvfp4W4a4TmaDescriptors descriptors,
+#endif
+    float alpha, __nv_bfloat16* __restrict__ output, int token_count) {
     static_assert(Geometry::kOutputRows == 34816);
     static_assert(Geometry::kInputRows == 5120);
     static_assert((Geometry::kInputRows % Schedule::kBlockK) == 0);
@@ -71,6 +72,12 @@ __global__ __launch_bounds__(
     nvfp4_tma_raster_blocks(block_x, block_y);
     const int token_begin = block_y * Schedule::kBlockM;
     const int pair_begin  = block_x * kPairN;
+
+#ifdef _WIN32
+    // The descriptors are staged into a stream-owned device buffer by the launcher; the TMA proxy
+    // reads them directly, so no per-CTA tensormap fence is required.
+    const Nvfp4W4a4TmaDescriptors& descriptors = *descriptors_pointer;
+#endif
 
     if (threadIdx.x == 0) {
 #pragma unroll
@@ -272,6 +279,11 @@ __global__ __launch_bounds__(
         const int token_local = task / kVectorsPerRow;
         const int row_vector  = task - token_local * kVectorsPerRow;
         const int token       = token_begin + token_local;
+        // The last M tile may be partial. A padded row reads only memory this route owns - its
+        // codes are TMA zero-fill, because the code descriptor's row extent is the real token
+        // count, and its scales are the zeroes in the padded plane - so it computes without
+        // reaching past anything. It owns no output, so its store is dropped here.
+        if (token >= token_count) { continue; }
         const uint4 values =
             load_vec<uint4>(shared_output + token_local * kOutputStride + row_vector * 8);
         store_vec(output + static_cast<std::int64_t>(token) * kIntermediate + pair_begin +

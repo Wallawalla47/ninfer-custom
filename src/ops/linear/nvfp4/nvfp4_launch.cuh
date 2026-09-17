@@ -97,10 +97,10 @@ template <Nvfp4GeometryId Geometry>
 void launch_nvfp4_a4_tma(const Weight& weight, Tensor& out, Nvfp4W4a4Workspace scratch,
                          std::int32_t tokens, cudaStream_t stream) {
     const float alpha = 1.0f / (weight.input_scale_divisor * weight.weight_scale_divisor);
-    launch_nvfp4_w4a4_tma_linear(Geometry, scratch.codes, scratch.scales,
-                                 static_cast<const std::uint8_t*>(weight.qdata),
-                                 static_cast<const std::uint8_t*>(weight.scales),
-                                 static_cast<__nv_bfloat16*>(out.data), tokens, alpha, stream);
+    launch_nvfp4_w4a4_tma_linear(
+        Geometry, scratch.codes, scratch.scales, static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), static_cast<__nv_bfloat16*>(out.data),
+        tokens, alpha, stream);
 }
 
 // The TMA GEMM reads the tiled plane; every MMA GEMM reads the row-major one. Stating that here,
