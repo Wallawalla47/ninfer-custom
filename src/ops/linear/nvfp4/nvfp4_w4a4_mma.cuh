@@ -391,8 +391,9 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_w4a4
 // the request wide. The byte order inside a tile is unchanged, so the shared image the MMA reads is
 // identical.
 //
-// It is a bijection onto the same byte range only for a whole number of token tiles; the caller
-// checks that before selecting this layout.
+// It addresses whole tiles, so a ragged token count is padded up to one and that padding is
+// written with zeroes below. launch_nvfp4_w4a4_quantize checks that the plane was allocated
+// for the padded count before this layout is selected.
 template <class Geometry>
 __device__ __forceinline__ std::int64_t nvfp4_tiled_scale_offset(int token, int group) {
     constexpr int kGroupsPerTile = kNvfp4ScaleTileGroups;

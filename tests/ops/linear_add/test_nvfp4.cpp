@@ -102,9 +102,9 @@ int run_shape(std::int32_t n, std::int32_t k, std::uint32_t seed) {
         Invocation{96, ops::LinearPolicy::AllowA4},
         Invocation{128, ops::LinearPolicy::AllowA4},
         Invocation{129, ops::LinearPolicy::AllowA4},
-        // 1023 and 1025 straddle this Op's W4A4 TMA floor: the scale plane is written tiled at
-        // 1024 and row-major on either side, so a layout disagreeing with the selected route
-        // shows up here and nowhere else.
+        // 1023, 1024 and 1025 straddle this route's floor. 1024 was the narrowest width it
+        // took before; 1025 is the first ragged one it takes now, and its last M tile holds a
+        // single real token, which is the emptiest grid this route ever runs.
         Invocation{1023, ops::LinearPolicy::AllowA4},
         Invocation{1024, ops::LinearPolicy::AllowA4},
         Invocation{1025, ops::LinearPolicy::AllowA4},

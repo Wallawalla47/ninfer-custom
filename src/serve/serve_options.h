@@ -27,8 +27,6 @@ struct ServeOptions {
     int port         = 8080;
     std::string api_key;                          // empty => no auth
     std::optional<std::string> model_id_override; // unset => artifact metadata.name
-    // Optional startup override for the artifact's frontend/chat_template.jinja.
-    std::filesystem::path chat_template_path;
     std::string request_log_jsonl;                // empty => structured request logging disabled
     float rope_yarn_factor             = 1.0F;
     std::uint32_t max_context          = 8192;

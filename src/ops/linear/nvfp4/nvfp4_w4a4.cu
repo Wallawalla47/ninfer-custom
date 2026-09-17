@@ -53,6 +53,17 @@ void launch_nvfp4_w4a4_quantize(const Tensor& x, const Weight& weight, Nvfp4W4a4
     if (workspace.codes == nullptr || workspace.scales == nullptr) {
         throw std::invalid_argument("nvfp4 W4A4 requires caller workspace");
     }
+    // The tiled layout writes the padding of the last tile, so it needs a plane allocated over the
+    // padded token count. Check that here, where the layout is acted on, rather than trust each
+    // caller to have sized it that way.
+    if (layout == Nvfp4ScaleLayout::Tiled) {
+        const std::size_t needed = static_cast<std::size_t>(nvfp4_w4a4_padded_tokens(x.ne[1])) *
+                                   (static_cast<std::size_t>(weight.k) / 16);
+        if (workspace.scale_bytes < needed) {
+            throw std::invalid_argument(
+                "nvfp4 W4A4 tiled scales need a plane allocated over whole token tiles");
+        }
+    }
     switch (weight.k) {
     case Nvfp4Activation5120Geometry::kInputRows:
         launch_quantize_exact<Nvfp4Activation5120Geometry>(x, weight, workspace, layout, stream);

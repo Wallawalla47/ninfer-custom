@@ -45,13 +45,13 @@ struct Nvfp4LinearSwiGluTmaSharedStorage {
 template <class Geometry, class Schedule>
 __global__ __launch_bounds__(
     Schedule::kThreads,
-    Schedule::
-        kMinBlocksPerSm) void nvfp4_linear_swiglu_w4a4_tma_kernel(const __grid_constant__
-                                                                      Nvfp4W4a4TmaDescriptors
-                                                                          descriptors,
-                                                                  float alpha,
-                                                                  __nv_bfloat16* __restrict__ output,
-                                                                  int token_count) {
+    Schedule::kMinBlocksPerSm) void nvfp4_linear_swiglu_w4a4_tma_kernel(
+#ifdef _WIN32
+    const Nvfp4W4a4TmaDescriptors* descriptors_pointer,
+#else
+    const __grid_constant__ Nvfp4W4a4TmaDescriptors descriptors,
+#endif
+    float alpha, __nv_bfloat16* __restrict__ output, int token_count) {
     static_assert(Geometry::kOutputRows == 34816);
     static_assert(Geometry::kInputRows == 5120);
     static_assert((Geometry::kInputRows % Schedule::kBlockK) == 0);
@@ -72,6 +72,12 @@ __global__ __launch_bounds__(
     nvfp4_tma_raster_blocks(block_x, block_y);
     const int token_begin = block_y * Schedule::kBlockM;
     const int pair_begin  = block_x * kPairN;
+
+#ifdef _WIN32
+    // The descriptors are staged into a stream-owned device buffer by the launcher; the TMA proxy
+    // reads them directly, so no per-CTA tensormap fence is required.
+    const Nvfp4W4a4TmaDescriptors& descriptors = *descriptors_pointer;
+#endif
 
     if (threadIdx.x == 0) {
 #pragma unroll

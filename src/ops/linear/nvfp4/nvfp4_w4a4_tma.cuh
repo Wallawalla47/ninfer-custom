@@ -399,10 +399,11 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_w4a4
                 shared_output + token1 * kOutputStride + parent_row);
             const int global_row0 = row_begin + parent_row;
             const int global_row1 = global_row0 + 1;
-            // The last M tile may be partial. The activation descriptors carry the real token count
-            // as their row extent, so TMA zero-fills the rows past the end; the padded lanes only
-            // have to stay off other people's memory, so clamp the token index the epilogue reads
-            // with and drop their store below.
+            // The last M tile may be partial. The activation code descriptor carries the real
+            // token count as its row extent, so TMA zero-fills the code rows past the end; the
+            // scale plane is padded instead and the quantizer writes zeroes there. Either way a
+            // padded lane contributes nothing and only has to stay off other people's memory,
+            // so clamp the token index the epilogue reads with and drop its store below.
             const int global_token0 = min(token_begin + token0, token_count - 1);
             const int global_token1 = min(token_begin + token1, token_count - 1);
             const float value00 =
