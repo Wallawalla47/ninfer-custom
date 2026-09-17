@@ -4,10 +4,13 @@
 #include "core/device.h"
 #include "core/pdl.cuh"
 #include "ops/common/math.h"
+#include "ops/linear/q4/q4_ksplit_mma.cuh"
+#include "ops/linear/q4/q4_ksplit_strided_store.cuh"
 #include "ops/linear/q4/q4_rowsplit_gemm_simt.cuh"
 #include "ops/linear/q4/q4_rowsplit_gemv.cuh"
 #include "ops/linear/q5/q5_rowsplit_gemm_simt.cuh"
 #include "ops/linear/q5/q5_rowsplit_gemv.cuh"
+#include "ops/linear/q5/q5_rowsplit_rowblock_small_t.cuh"
 
 #include <cuda_bf16.h>
 
@@ -62,20 +65,88 @@ void launch_q4_simt_route(const Tensor& x, const Weight& weight, Tensor& out, cu
     }
 }
 
+template <std::int32_t Capacity>
+void launch_q4_ksplit_exact(const Tensor& x, const Weight& weight, Tensor& out,
+                            cudaStream_t stream) {
+    using Geometry = Q4LinearGeometry<kQkRows, kHidden>;
+    constexpr std::int32_t kTileCols = (Capacity + 7) / 8 * 8;
+    const std::int32_t out_ld = static_cast<std::int32_t>(out.nb[1] / sizeof(__nv_bfloat16));
+    const Q4KSplitStridedStore<false, 0> store{static_cast<__nv_bfloat16*>(out.data), out_ld,
+                                               nullptr, 0, Capacity};
+    q4_ksplit_mma_kernel<Geometry, kTileCols, Capacity, Q4KSplitStridedStore<false, 0>,
+                         Q4KSplitIdentityRows, true>
+        <<<kQkRows / Q4KSplitMmaSchedule::kRowsPerCta, Q4KSplitMmaSchedule::kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales),
+            static_cast<__nv_bfloat16*>(out.data), store, {}, x.ne[1]);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void launch_q4_ksplit_band(const Tensor& x, const Weight& weight, Tensor& out,
+                           cudaStream_t stream) {
+    if (weight.padded_shape[1] != kHidden) {
+        throw std::invalid_argument("Q4/Q5 GDN K-split requires padded K == hidden");
+    }
+    switch (x.ne[1]) {
+    case 7:
+        launch_q4_ksplit_exact<7>(x, weight, out, stream);
+        return;
+    case 8:
+        launch_q4_ksplit_exact<8>(x, weight, out, stream);
+        return;
+    default:
+        throw std::invalid_argument("Q4/Q5 GDN K-split band covers T in [7,8]");
+    }
+}
+
 void launch_q4(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
-    if (x.ne[1] == 1) {
+    switch (x.ne[1]) {
+    case 1:
         launch_q4_gemv(x, weight, out, stream);
         return;
-    }
-    if (x.ne[1] <= 4) {
+    case 2:
+    case 3:
+    case 4:
         launch_q4_simt_route<Q4GdnSimtR8C4Schedule>(x, weight, out, stream);
         return;
-    }
-    if (x.ne[1] <= 15) {
-        launch_q4_simt_route<Q4GdnSimtR8C8Schedule>(x, weight, out, stream);
+    case 7:
+    case 8:
+        // The K-split MMA arms all 8 warps of a CTA onto K instead of waiting out the weight stream
+        // of a row, which measured 21.8 us against the row-split SIMT's 32-34 us for this parent
+        // (probe, cold, median of 20). T=2..6 keep the SIMT tile: there the K-split's wider column
+        // tile wastes more MMA work than it saves.
+        launch_q4_ksplit_band(x, weight, out, stream);
         return;
+    default:
+        if (x.ne[1] <= 15) {
+            launch_q4_simt_route<Q4GdnSimtR8C8Schedule>(x, weight, out, stream);
+            return;
+        }
+        throw std::invalid_argument("Q4/Q5 GDN independent launch requires T in [1,15]");
     }
-    throw std::invalid_argument("Q4/Q5 GDN independent launch requires T in [1,15]");
+}
+
+void launch_q5_rowblock(const Tensor& x, const Weight& weight, Tensor& value, Tensor& z,
+                        cudaStream_t stream) {
+    constexpr int kColsPerTile  = 8;
+    constexpr int kRowsPerBlock = 8;
+    constexpr int kStages       = 2;
+    constexpr int kThreads      = kRowsPerBlock * 32;
+    const std::int32_t cols     = x.ne[1];
+    const std::int32_t out_ld   = static_cast<std::int32_t>(value.nb[1] / sizeof(__nv_bfloat16));
+    const dim3 grid(static_cast<unsigned>(div_up(kValueZRows, kRowsPerBlock)),
+                    static_cast<unsigned>(div_up(cols, kColsPerTile)), 1u);
+    q5_rowsplit_rowblock_small_t_kernel<Q5RowSplitSimtSchedule, kColsPerTile, kRowsPerBlock,
+                                        kStages, true, kValueRows>
+        <<<grid, kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.qhigh),
+            static_cast<const std::uint8_t*>(weight.scales),
+            static_cast<__nv_bfloat16*>(value.data), static_cast<__nv_bfloat16*>(z.data),
+            kValueZRows, out_ld, kHidden, cols, weight.padded_shape[1], kHidden / 1024);
+    CUDA_CHECK(cudaGetLastError());
 }
 
 void launch_q5_gemv(const Tensor& x, const Weight& weight, Tensor& value, Tensor& z,
@@ -160,6 +231,14 @@ void launch_q5(const Tensor& x, const Weight& weight, Tensor& value, Tensor& z,
     }
     if (x.ne[1] <= 6) {
         launch_q5_split4_exact(x, weight, value, z, stream);
+        return;
+    }
+    if (x.ne[1] <= 8) {
+        // T=7/8: the row-block kernel stages one 1024-value activation slab per block in shared
+        // memory and lets all kRowsPerBlock warps read it, so the activation traffic drops by
+        // kRowsPerBlock. At T=8 that moved this side from 93.4 us (row-split SIMT, activation
+        // bound at ~12.7 TB/s of L1/L2 traffic) to 62.7 us, which is the weight roofline.
+        launch_q5_rowblock(x, weight, value, z, stream);
         return;
     }
     if (x.ne[1] <= 15) {
