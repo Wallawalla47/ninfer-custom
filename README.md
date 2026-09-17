@@ -1,3 +1,132 @@
+# NInfer — local fork
+
+This repository is a personal fork of [Neroued/ninfer](https://github.com/Neroued/ninfer),
+maintained on the branch `port/local-features-2026-09-15`. It tracks upstream while adding
+local features on top. This section summarises, in high terms, everything merged in from
+other sources and everything built locally; the upstream README follows, unmodified, below
+the "Upstream README" heading.
+
+## Merged from upstream and other sources
+
+**Upstream pull requests** (`Neroued/ninfer`):
+
+- **PR #162** — llama.cpp-compatible model metadata on `/v1/models` (`n_vocab`, `n_ctx`,
+  `n_ctx_train`, `n_embd`, `n_params`, `size`, `ftype`), by
+  [Hector Ramon Jimenez (hecrj)](https://github.com/hecrj). Re-implemented against the v3
+  `src/models` layout, which replaced the `src/targets` layout the PR was written for.
+- **PR #197** — honour `ignore_eos` on chat completions, by
+  [Thireus](https://github.com/Thireus).
+- **PR #255** — widen the Q5 routed-down Rows2 window to its measured crossover, by
+  [Michael Dementii](https://github.com/MichaelDementii).
+- **PR #257** — choose the predicated Q8 GEMM cache policy instead of inheriting it, by
+  Michael Dementii.
+- **PR #262** — retune the Q4 34816×5120 LinearSwiGLu dispatch around the #261 linear
+  routes, by [Minnnn](https://github.com/Minnnn).
+- **PR #264** — take a partial last M tile in the fused SwiGLU TMA route, by Michael
+  Dementii (merged with the local Windows descriptor-staging path retained).
+- **PR #266** — tune the q5 a16 linear and residual projection routes, by Minnnn.
+- **PR #268** — fold the sigmoid gate into the causal reduce epilogue, by Michael
+  Dementii.
+
+Recurring merges from upstream `master` additionally bring in ongoing kernel and build
+work: NVFP4/Q8/sparse-MoE dispatch tuning, whole-tile W4A4 TMA scale routing, the real
+Jinja chat-template interpreter (`third_party/llama-jinja`), state-cache benchmark
+fixtures, and the per-component CMake reorganisation.
+
+**Other sources:**
+
+- **Ngram copy drafting (the original C=1 implementation)** — from the
+  [remesis/ninfer](https://github.com/remesis/ninfer) fork, by
+  [remesis](https://github.com/remesis): exact-checked CPU copy proposals alongside
+  MTP/DFlash/DFlash2 with optional bounded session retention (upstream issue
+  [Neroued/ninfer#234](https://github.com/Neroued/ninfer/issues/234)), cherry-picked from
+  remesis's branch. The C=1 implementation is remesis's original work; this fork's
+  contribution is the extension to C>1 concurrency (below).
+- **Vision overlay residency (RAM offload of the vision tower)** — original work by
+  [Valeriy Selitskiy (iamwavecut)](https://github.com/iamwavecut), from the
+  previous-generation tree's PR #73 ("content-addressed KV host cache + vision overlay
+  residency"): the overlay port, 35B support, and the residency flags. Re-implemented for
+  this V3 engine as `--vision-residency overlay` (local re-implementation, below).
+
+## Local changes
+
+**Platform**
+
+- **Native Windows build and run** — MSVC + CUDA on Windows: static CUDA runtime,
+  vcpkg-resolved FFmpeg/curl with runtime DLL staging, non-RDC NVFP4 kernels, `ws2_32` and
+  `UTF8PROC_STATIC`, TMA descriptors staged through pinned buffers (around MSVC's
+  `__grid_constant__` limitation), Windows mapped-file and `ReadOnlyFile` rules in the
+  artifact Reader, and re-application of the Windows build after upstream's per-component
+  CMake reorganisation.
+- **PNG image support in the vision path** — the prebuilt Windows vcpkg FFmpeg tree ships
+  without the PNG decoder, so a native PNG decode path (`NINFER_MEDIA_NATIVE_PNG`) was
+  added; the vision path accepts `.png` images on these builds.
+
+**Operability and UX**
+
+- **Colourful console logging** — colourised operational and CLI statistics output for
+  visually tracking throughput, cache-reuse and memory statistics (`--log-colours`).
+- **Categorised help screens** — the flat CLI and serve option dumps were replaced with
+  named sections (Context, KV Cache, Speculative Decoding, Vision, Sampling, Networking &
+  Resources, …), making the flags easier to read and documenting previously undocumented
+  flags.
+- **`--kv-headroom-mib`** — manually specify the headroom used by the automatic KV
+  capacity sizing (upstream keeps a fixed 1 GiB; this makes it an operator choice).
+- **`--cuda-graph-allowance-mib`** — manually specify the CUDA Graph memory allowance
+  instead of the engine's automatic value.
+- **`--thinking-budget-message`** — manually specify the message appended when a request
+  hits its thinking budget, replacing the built-in end-of-thinking control message.
+- **llama.cpp-compatible `/v1/models` metadata** — the local re-implementation of
+  upstream PR #162 (above).
+- **`--chat-template`** — load the artifact chat template from a file.
+
+**Features**
+
+- **Prefix-caching improvements** — a set of context-cache changes that raise the hit
+  rate and reduce refills: salvaging prefilled context when a request is aborted (a
+  retry resumes from the salvaged frontier instead of root), protecting repeatedly hit
+  checkpoints from eviction (SLRU-style destruction floor), engine-automated anchoring of
+  the last L message boundaries (`--max-long-anchors-per-continuation`), and a
+  correctness fix that clears staged prefill bookkeeping when a lane is published.
+- **Ngram copy drafting above one concurrent request** — the local contribution here is
+  the C>1 extension of remesis's C=1 implementation: it makes ngram copy drafting work
+  with more than one concurrent request across MTP/DFlash/DFlash2, with a per-lane
+  decode frame, the cross-request retention archive enabled at concurrency above one,
+  and startup validation of the GDN width/concurrency limit.
+- **Vision offload re-implementation** — the local V3 re-implementation of the overlay
+  residency above: `--vision-residency overlay` streams the vision tower from pinned host
+  RAM instead of holding it on the GPU (per-object overlay staging), freeing device
+  memory for KV, including the fix that made the overlay path work for every artifact.
+- **`--rope-yarn-factor`** — startup-fixed YaRN context extension (factor 1–4, capped at
+  the 1M visible-keys limit).
+- **Q8 MTP with mixed-format row-split projection**, and a **runtime-shape bf16 GEMM
+  fallback** for shapes without a specialised kernel (full-precision vocab heads, bf16
+  vision-tower projections).
+- **Quasar NVFP4 conversion fixes** — dflash2 head-use declarations and an indexed
+  proposal head (`--proposal`) so rebuilt artifacts support `--lm-head-draft`.
+
+## Thanks
+
+A big thank you to all the contributors to upstream NInfer —
+[Neroued](https://github.com/Neroued),
+[Michael Dementii](https://github.com/MichaelDementii),
+[Minnnn](https://github.com/Minnnn),
+[Thireus](https://github.com/Thireus),
+[remesis](https://github.com/remesis),
+[Valeriy Selitskiy (iamwavecut)](https://github.com/iamwavecut),
+[Hector Ramon Jimenez (hecrj)](https://github.com/hecrj), and everyone else whose pull
+requests, reviews and commits made this fork possible — and a particular thank you to
+**[Neroued](https://github.com/Neroued)** for creating NInfer, maintaining upstream so
+well, and for the work this branch builds on.
+
+---
+
+## Upstream README (direct copy)
+
+Everything below is a **direct, unmodified copy of the upstream
+[NInfer README](https://github.com/Neroued/ninfer/blob/master/README.md)**, as of the
+latest upstream sync (`5b4303c0` on `origin/master`).
+
 # NInfer
 
 > Selected checkpoints. Maximum single-GPU inference performance.
