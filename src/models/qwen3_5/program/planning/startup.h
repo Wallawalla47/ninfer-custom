@@ -71,6 +71,9 @@ struct WorkspacePlan {
 
 struct SequencePlanningInputs {
     const execution::Parameters* parameters = nullptr;
+    std::uint32_t neural_draft_window       = 0;
+    std::uint32_t ngram_draft_window        = 0;
+    std::uint32_t ngram_min_match           = 12;
     std::uint32_t capacity                  = 0;
     std::uint32_t max_concurrency           = 1;
     std::uint32_t prefill_chunk             = 0;
@@ -91,6 +94,9 @@ namespace ninfer::models::qwen3_5::detail {
 
 struct SequencePlanImpl {
     const execution::Parameters* parameters = nullptr;
+    std::uint32_t neural_draft_window       = 0;
+    std::uint32_t ngram_draft_window        = 0;
+    std::uint32_t ngram_min_match           = 12;
     std::uint32_t capacity                  = 0;
     std::uint32_t kv_capacity               = 0;
     std::uint32_t main_page_groups          = 0;

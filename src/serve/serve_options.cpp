@@ -79,6 +79,8 @@ std::string serve_usage_text(const char* argv0) {
            "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
+           "[--ngram-draft-tokens 1..63] [--ngram-min-match 4..64] "
+           "[--ngram-archive-mib N] [--ngram-session-mib N] [--ngram-native-sessions] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--chat-template FILE] [--lm-head-draft] [--no-thinking] [--preserve-thinking] "
@@ -268,6 +270,22 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--draft-tokens") {
             options.speculative.draft_tokens = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--draft-tokens"), "draft-tokens"));
+        } else if (arg == "--ngram-draft-tokens") {
+            options.speculative.ngram_draft_tokens = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--ngram-draft-tokens"), "ngram-draft-tokens"));
+        } else if (arg == "--ngram-min-match") {
+            options.speculative.ngram_min_match = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--ngram-min-match"), "ngram-min-match"));
+        } else if (arg == "--ngram-archive-mib" || arg == "--ngram-session-mib") {
+            const auto mib = parse_u64(require_value(arg.c_str()), arg.c_str());
+            if (mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("ngram archive capacity is out of range");
+            }
+            auto& bytes = arg == "--ngram-archive-mib" ? options.speculative.ngram_archive_bytes
+                                                       : options.speculative.ngram_session_bytes;
+            bytes       = static_cast<std::size_t>(mib << 20);
+        } else if (arg == "--ngram-native-sessions") {
+            options.ngram_native_sessions = true;
         } else if (arg == "--default-max-tokens") {
             options.default_max_tokens =
                 parse_nonnegative_int(require_value("--default-max-tokens"), "default-max-tokens");
@@ -360,6 +378,12 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         throw std::invalid_argument("--prefill-chunk must be a positive multiple of 128");
     }
     product::validate_speculative_cli_options(options.speculative);
+    if (options.speculative.ngram_draft_tokens != 0 && options.max_concurrency != 1) {
+        throw std::invalid_argument("ngram currently requires --max-concurrency 1");
+    }
+    if (options.ngram_native_sessions && options.speculative.ngram_archive_bytes == 0) {
+        throw std::invalid_argument("--ngram-native-sessions requires --ngram-archive-mib");
+    }
     if (default_max_tokens_explicit) {
         if (options.default_max_tokens <= 0) {
             throw std::invalid_argument("--default-max-tokens must be positive");

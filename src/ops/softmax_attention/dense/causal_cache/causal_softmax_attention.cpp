@@ -18,6 +18,7 @@ namespace {
 constexpr std::int32_t kHeadDim                      = 256;
 constexpr float kExpectedScale                       = 0.0625f;
 constexpr std::int32_t kMaximumVerifyTokens          = 16;
+constexpr std::int32_t kMaximumSingleRowVerifyTokens = 64;
 constexpr std::int32_t kMaximumBatchSize             = 8;
 constexpr std::uint32_t kTwoChunkPromptVisibleKeys   = 512;
 constexpr std::uint32_t kThreeChunkPromptVisibleKeys = 1024;
@@ -286,11 +287,10 @@ void for_each_small_t_chunk(const Tensor& q, const Tensor& positions, WorkspaceA
                             KvCacheStorage cache_storage, CausalAttentionExecutionEnvelope envelope,
                             Tensor& out, Launch&& launch) {
     for (std::int32_t begin = 0; begin < q.ne[2];
-         begin +=
-         causal_attention_chunk_tokens(q.ne[1], q.ne[2], 1, cache_storage, envelope)) {
-        const std::int32_t count = std::min(
-            causal_attention_chunk_tokens(q.ne[1], q.ne[2], 1, cache_storage, envelope),
-            q.ne[2] - begin);
+         begin += causal_attention_chunk_tokens(q.ne[1], q.ne[2], 1, cache_storage, envelope)) {
+        const std::int32_t count =
+            std::min(causal_attention_chunk_tokens(q.ne[1], q.ne[2], 1, cache_storage, envelope),
+                     q.ne[2] - begin);
         auto chunk_scope = workspace.scope();
         const std::int32_t splits =
             detail::causal_attention_split_capacity(q.ne[1], count, cache_storage, envelope);
@@ -308,11 +308,11 @@ void launch_chunked_small_t(const Tensor& q, const Tensor& k, const Tensor& v,
                             CausalAttentionExecutionEnvelope envelope, WorkspaceArena& workspace,
                             Tensor& out, cudaStream_t stream) {
     for (std::int32_t begin = 0; begin < q.ne[2];
-         begin += causal_attention_chunk_tokens(q.ne[1], q.ne[2], q.ne[3], cache.storage,
-                                                        envelope)) {
-        const std::int32_t count  = std::min(causal_attention_chunk_tokens(
-                                                q.ne[1], q.ne[2], q.ne[3], cache.storage, envelope),
-                                             q.ne[2] - begin);
+         begin +=
+         causal_attention_chunk_tokens(q.ne[1], q.ne[2], q.ne[3], cache.storage, envelope)) {
+        const std::int32_t count = std::min(
+            causal_attention_chunk_tokens(q.ne[1], q.ne[2], q.ne[3], cache.storage, envelope),
+            q.ne[2] - begin);
         auto chunk_scope          = workspace.scope();
         const std::int32_t splits = detail::causal_attention_split_capacity(
             q.ne[1], count, cache.storage, envelope, q.ne[3]);
@@ -345,7 +345,10 @@ namespace detail {
 CausalAttentionRoute causal_attention_resolve_route(std::int32_t q_heads, std::int32_t width,
                                                     std::int32_t batch_size, KvCacheStorage storage,
                                                     CausalAttentionExecutionEnvelope envelope) {
-    if (q_heads == 24 && width <= kMaximumVerifyTokens) {
+    const std::int32_t maximum_verify_tokens = batch_size == 1 && envelope.wide_verification
+                                                   ? kMaximumSingleRowVerifyTokens
+                                                   : kMaximumVerifyTokens;
+    if (q_heads == 24 && width <= maximum_verify_tokens) {
         if (batch_size == 1) {
             std::uint32_t prompt_limit = 0;
             switch (storage) {
@@ -373,7 +376,7 @@ CausalAttentionRoute causal_attention_resolve_route(std::int32_t q_heads, std::i
     if (batch_size > 1) return CausalAttentionRoute::ChunkedSmallT;
     const std::uint32_t prompt_visible_keys =
         width <= 12 ? kTwoChunkPromptVisibleKeys : kThreeChunkPromptVisibleKeys;
-    if (q_heads == 16 && width <= kMaximumVerifyTokens &&
+    if (q_heads == 16 && width <= maximum_verify_tokens &&
         envelope.max_visible_keys > prompt_visible_keys)
         return CausalAttentionRoute::ChunkedSmallT;
     return CausalAttentionRoute::Prompt;
@@ -425,20 +428,23 @@ std::size_t causal_softmax_attention_workspace_capacity_bytes(
         if (route == detail::CausalAttentionRoute::SmallT) { return chunk_capacity(width); }
         std::size_t maximum = 0;
         for (std::int32_t begin = 0; begin < width;
-             begin += causal_attention_chunk_tokens(q_heads, width, batch_size,
-                                                            cache_storage, envelope)) {
+             begin +=
+             causal_attention_chunk_tokens(q_heads, width, batch_size, cache_storage, envelope)) {
             maximum = std::max(
                 maximum,
-                chunk_capacity(std::min(causal_attention_chunk_tokens(
-                                            q_heads, width, batch_size, cache_storage, envelope),
+                chunk_capacity(std::min(causal_attention_chunk_tokens(q_heads, width, batch_size,
+                                                                      cache_storage, envelope),
                                         width - begin)));
         }
         return maximum;
     };
 
-    std::size_t maximum = 0;
-    if (min_width <= kMaximumVerifyTokens) {
-        const std::int32_t last = std::min(max_width, kMaximumVerifyTokens);
+    std::size_t maximum                      = 0;
+    const std::int32_t maximum_verify_tokens = batch_size == 1 && envelope.wide_verification
+                                                   ? kMaximumSingleRowVerifyTokens
+                                                   : kMaximumVerifyTokens;
+    if (min_width <= maximum_verify_tokens) {
+        const std::int32_t last = std::min(max_width, maximum_verify_tokens);
         for (std::int32_t width = min_width; width <= last; ++width) {
             maximum = std::max(maximum, exact_capacity(width));
         }

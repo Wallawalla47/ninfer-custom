@@ -265,26 +265,26 @@ detail::PhysicalResources positive_resource_difference(detail::PhysicalResources
 
 execution::MtpCausalAttentionEnvelopes mtp_causal_attention_envelopes(std::uint32_t max_frontier,
                                                                       std::uint32_t k,
-                                                                      std::uint32_t capacity) {
+                                                                      std::uint32_t capacity,
+                                                                      std::uint32_t next_k) {
     const auto visible = [capacity](std::uint64_t value) {
         return static_cast<std::uint32_t>(std::min<std::uint64_t>(capacity, value));
     };
     execution::MtpCausalAttentionEnvelopes out;
-    out.target_verify = {1, visible(static_cast<std::uint64_t>(max_frontier) + k + 1ULL)};
+    out.target_verify = {1, visible(static_cast<std::uint64_t>(max_frontier) + k + 1ULL), k > 15};
     out.batch         = out.target_verify;
-    for (std::uint32_t step = 0; step + 1 < k; ++step) {
+    for (std::uint32_t step = 0; step + 1 < next_k; ++step) {
         out.ar[step] = {1, visible(static_cast<std::uint64_t>(max_frontier) + k + step + 2ULL)};
     }
     return out;
 }
 
-execution::DFlashEnvelopes dflash_envelopes(std::uint32_t min_frontier, std::uint32_t max_frontier,
-                                            std::uint32_t k) {
+execution::DFlashEnvelopes dflash_envelopes(std::uint32_t min_frontier,
+                                            std::uint32_t max_frontier) {
     (void)min_frontier;
     return execution::DFlashEnvelopes{
-        .local  = {0, max_frontier},
-        .full   = {0, max_frontier},
-        .append = {0, k + 1},
+        .local = {0, max_frontier},
+        .full  = {0, max_frontier},
     };
 }
 

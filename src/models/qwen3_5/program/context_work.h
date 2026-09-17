@@ -60,10 +60,11 @@ detail::PhysicalResources checked_resource_difference(detail::PhysicalResources 
 detail::PhysicalResources positive_resource_difference(detail::PhysicalResources value,
                                                        detail::PhysicalResources removed) noexcept;
 
-execution::MtpCausalAttentionEnvelopes
-mtp_causal_attention_envelopes(std::uint32_t max_frontier, std::uint32_t k, std::uint32_t capacity);
+execution::MtpCausalAttentionEnvelopes mtp_causal_attention_envelopes(std::uint32_t max_frontier,
+                                                                      std::uint32_t k,
+                                                                      std::uint32_t capacity,
+                                                                      std::uint32_t next_k);
 
-execution::DFlashEnvelopes dflash_envelopes(std::uint32_t min_frontier, std::uint32_t max_frontier,
-                                            std::uint32_t k);
+execution::DFlashEnvelopes dflash_envelopes(std::uint32_t min_frontier, std::uint32_t max_frontier);
 
 } // namespace ninfer::models::qwen3_5::detail
