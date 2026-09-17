@@ -104,10 +104,33 @@ int run_q4_q5_graph_case(DevicePackedWeight& query_key, DevicePackedWeight& valu
     launch(stream);
     CUDA_CHECK(cudaStreamEndCapture(stream, &graph));
     CUDA_CHECK(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0));
+
+    // Replay 1, checked on its own: the outputs are poisoned first, so a replay that skipped a
+    // range or wrote to a stale address is caught here rather than being masked by replay 2.
+    const auto verify_replay = [&](const std::vector<float>& expected, std::string_view tag) {
+        int bad = qkv.verify_guards(std::string("gdn qkv") + std::string(tag));
+        bad += z.verify_guards(std::string("gdn z") + std::string(tag));
+        bad += qkv.verify_fully_written(std::string("gdn qkv") + std::string(tag));
+        bad += z.verify_fully_written(std::string("gdn z") + std::string(tag));
+        bad += verify_output_range(std::string("gdn qk") + std::string(tag), qkv, kRows, 0, kQkRows,
+                                   query_key.host, 0, expected, kHidden, tokens);
+        bad += verify_output_range(std::string("gdn value") + std::string(tag), qkv, kRows, kQkRows,
+                                   kValueRows, value_z_weight.host, 0, expected, kHidden, tokens);
+        bad += verify_output_range(std::string("gdn z") + std::string(tag), z, kZRows, 0, kZRows,
+                                   value_z_weight.host, kValueRows, expected, kHidden, tokens);
+        return bad;
+    };
+    const std::string suffix = " Q4/Q5 A16 graph T=" + std::to_string(tokens);
+    qkv.repaint(stream);
+    z.repaint(stream);
     CUDA_CHECK(cudaGraphLaunch(executable, stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));
-    // The same executable must consume the changed activation that now lives at the captured
-    // address: a graph that baked its operands would keep reporting the first input here.
+    int failures = verify_replay(activation, suffix + " replay1");
+
+    // Replay 2 against a changed activation at the same captured address: a graph that baked its
+    // operands would keep reporting the first input here.
+    qkv.repaint(stream);
+    z.repaint(stream);
     activation      = make_bf16_activation(kHidden, tokens, 811U + tokens);
     activation_bits = bf16_bits(activation);
     CUDA_CHECK(cudaMemcpyAsync(device_activation.p, activation_bits.data(),
@@ -119,17 +142,8 @@ int run_q4_q5_graph_case(DevicePackedWeight& query_key, DevicePackedWeight& valu
     CUDA_CHECK(cudaGraphDestroy(graph));
     CUDA_CHECK(cudaStreamDestroy(stream));
 
-    const std::string suffix = " Q4/Q5 A16 graph T=" + std::to_string(tokens);
-    int failures             = qkv.verify_guards("gdn qkv" + suffix);
-    failures += z.verify_guards("gdn z" + suffix);
-    failures += qkv.verify_fully_written("gdn qkv" + suffix);
-    failures += z.verify_fully_written("gdn z" + suffix);
-    failures += verify_output_range("gdn qk" + suffix, qkv, kRows, 0, kQkRows, query_key.host, 0,
-                                    activation, kHidden, tokens);
-    failures += verify_output_range("gdn value" + suffix, qkv, kRows, kQkRows, kValueRows,
-                                    value_z_weight.host, 0, activation, kHidden, tokens);
-    failures += verify_output_range("gdn z" + suffix, z, kZRows, 0, kZRows, value_z_weight.host,
-                                    kValueRows, activation, kHidden, tokens);
+    failures += verify_replay(activation, suffix + " replay2");
+    failures += verify_preserved("gdn x" + suffix, device_activation, activation_bits);
     failures += query_key.verify_preserved("gdn query/key weight" + suffix);
     failures += value_z_weight.verify_preserved("gdn value/z weight" + suffix);
     return failures;
@@ -145,11 +159,11 @@ int run_q4_q5() {
     // Every route boundary and both of its neighbours: the Q4/Q5 column catalog hands 1..8 to the
     // small-T direct kernels, 9..32 to the 32x32 tile, 33..64 to the 32x64 tile, and 65 upward to
     // the 64x128 tile that also supplies the 128-column tail slices.
-    for (const std::int32_t tokens : {1, 2, 8, 9, 15, 16, 17, 32, 33, 64, 65, 127, 128, 129, 193}) {
+    for (const std::int32_t tokens : {1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 16, 17, 32, 33, 64, 65, 127, 128, 129, 193}) {
         failures += run_q4_q5_case(query_key, value_z_weight, tokens);
     }
     // One captured replay per route, including a 128-column tail slice (129 = 128 + 1).
-    for (const std::int32_t tokens : {9, 33, 65, 129}) {
+    for (const std::int32_t tokens : {7, 8, 9, 33, 65, 129}) {
         failures += run_q4_q5_graph_case(query_key, value_z_weight, tokens);
     }
     return failures;
