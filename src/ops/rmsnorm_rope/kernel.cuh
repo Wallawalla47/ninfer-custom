@@ -1,5 +1,4 @@
 #pragma once
-#include "ops/kernel/rope.cuh"
 #include "ops/common/dflash_rope.cuh"
 #include "ops/kernel/rope.cuh"
 #include "ops/rmsnorm_rope/d128.cuh"
