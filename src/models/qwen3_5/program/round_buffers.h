@@ -94,11 +94,17 @@ struct DFlashDecodeIngress {
     std::array<std::int32_t, kMaximumConcurrency> state_destination_slots{};
     std::array<ops::SamplingConfig, kMaximumConcurrency> sampling{};
     // Neural rounds copy only the prefix before ngram_tokens. Keep all controls above it;
-    // proposal-only payloads below it preserve the existing vector-aligned offsets.
-    std::array<TokenId, kDFlashVerifyMaximumDrafts> ngram_tokens{};
-    std::array<TokenId, ops::kSparseSpeculativeCandidates * kDFlashVerifyMaximumDrafts>
+    // proposal-only payloads below it preserve the existing vector-aligned offsets. The arrays
+    // are column-major per row (row stride = the round's draft width k, <= verify maximum):
+    //   ngram_tokens[row * k + step];
+    //   candidates/q[row * k * slots + step * slots + slot].
+    std::array<TokenId, kMaximumConcurrency * kDFlashVerifyMaximumDrafts> ngram_tokens{};
+    std::array<TokenId,
+               kMaximumConcurrency * ops::kSparseSpeculativeCandidates * kDFlashVerifyMaximumDrafts>
         ngram_candidates{};
-    std::array<float, ops::kSparseSpeculativeCandidates * kDFlashVerifyMaximumDrafts> ngram_q{};
+    std::array<float,
+               kMaximumConcurrency * ops::kSparseSpeculativeCandidates * kDFlashVerifyMaximumDrafts>
+        ngram_q{};
 };
 
 struct DFlashDecodeEgress {
