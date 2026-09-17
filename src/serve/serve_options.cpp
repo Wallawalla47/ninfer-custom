@@ -103,11 +103,12 @@ std::string serve_usage_text(const char* argv0) {
            "  --device N                 CUDA device ordinal (default 0)\n"
            "\n"
            "KV CACHE\n"
-           "  --kv-capacity N|auto       KV-cache capacity in tokens (default = --max-context;\n"
-           "                             auto sizes to free VRAM, leaving " +
+           "  --kv-capacity N|auto       KV-cache capacity in tokens (default =\n"
+           "                             --max-context; auto sizes to free VRAM,\n"
+           "                             leaving " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
-           " MiB headroom; configurable\n"
-           "                             via --kv-headroom-mib)\n"
+           " MiB of headroom; configurable via\n"
+           "                             --kv-headroom-mib)\n"
            "  --kv-headroom-mib N        VRAM headroom in MiB left by --kv-capacity auto\n"
            "                             (default " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
