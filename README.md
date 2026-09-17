@@ -106,6 +106,25 @@ fixtures, and the per-component CMake reorganisation.
 - **Quasar NVFP4 conversion fixes** — dflash2 head-use declarations and an indexed
   proposal head (`--proposal`) so rebuilt artifacts support `--lm-head-draft`.
 
+## Model artifacts
+
+**[Qwen3.8-27B-Quasar-NinferV3](https://huggingface.co/Wallawalla47/Qwen3.8-27B-Quasar-NinferV3)**
+on Hugging Face — a single-file `.ninfer` engine artifact of
+[QUASAR-QAT/Qwen3.8-27B-QUASAR-NVFP4](https://huggingface.co/QUASAR-QAT/Qwen3.8-27B-QUASAR-NVFP4)
+(the QAT-trained NVFP4 checkpoint), built with `tools/convert/quasar_nvfp4.py` for an
+RTX 5090 (sm_120a). The QUASAR NVFP4 weights are imported bit-exact (no requantisation
+round-trip); the DFlash2 draft model is grafted verbatim from the official NInfer
+artifact, and an indexed 131,072-row proposal head gathered from the QUASAR output head
+enables `--lm-head-draft`. The HF page carries the full creation outline and the
+conversion report.
+
+Configuration used for running it (single 32 GB GPU — stop any other resident model
+first):
+
+```bat
+ninfer-serve.exe qwen3_8_27b_nvfp4-quasar-proposal.ninfer --host 127.0.0.1 --port 8080 --max-context 240000 --max-concurrency 5 --spec dflash2 --draft-tokens 7 --lm-head-draft --ngram-draft-tokens 15 --ngram-min-match 12 --kv-dtype int8 --preserve-thinking --host-kv-mib 24000 --pending-timeout-ms 900000 --prefill-chunk 2048 --kv-capacity auto --kv-headroom-mib 0 --log-colours on --host-state-slots 64 --max-private-continuations 64 --max-long-anchors-per-continuation 64 --max-shared-prefixes 64 --ngram-archive-mib 2048 --ngram-session-mib 256 --ngram-native-sessions --cuda-graph-allowance-mib 500
+```
+
 ## Thanks
 
 A big thank you to all the contributors to upstream NInfer —
