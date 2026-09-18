@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/tma_descriptor_staging.h"
 #include "ops/common/mbarrier.cuh"
 #include "ops/common/memory.cuh"
 #include "ops/common/mma.cuh"
@@ -92,6 +93,14 @@ Nvfp4W4a4TmaDescriptors make_nvfp4_w4a4_tma_descriptors(
         const_cast<std::uint8_t*>(weight_scales), CU_TENSOR_MAP_DATA_TYPE_UINT8, 16,
         kWeightScaleBytes / 16, 16, 16, 64, CU_TENSOR_MAP_SWIZZLE_NONE, "encode weight scales TMA");
     return descriptors;
+}
+
+// The single Windows staging ring for Nvfp4W4a4TmaDescriptors, shared by every W4A4 TMA launch
+// route (linear, attention, GDN, linear-add, LinearSwiGLU). See tma_descriptor_staging.h for
+// the invariants the shared ring and device buffer rely on.
+inline TmaDescriptorStaging<Nvfp4W4a4TmaDescriptors>& tma_descriptor_staging() {
+    static TmaDescriptorStaging<Nvfp4W4a4TmaDescriptors> staging;
+    return staging;
 }
 
 template <int BlockM, int Stages, int MinBlocksPerSm,
