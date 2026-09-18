@@ -2,7 +2,6 @@
 
 #include "ops/rmsnorm_rope/launch.h"
 
-#include <cmath>
 #include <array>
 #include <cstddef>
 #include <cstdint>
