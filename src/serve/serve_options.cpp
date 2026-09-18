@@ -123,7 +123,8 @@ std::string serve_usage_text(const char* argv0) {
            "  --max-long-anchors-per-continuation N  long anchors per continuation; the engine\n"
            "                                         anchors the last N message boundaries (default 4)\n"
            "  --max-shared-prefixes N          bounded shared prefix catalogs\n"
-           "                                    (default = max(concurrency,4))\n"
+           "                                    (default = max(concurrency," +
+           std::to_string(kMaximumPreparedPromptCacheCandidatesPerRequest) + "))\n"
            "  --no-prefix-reuse          disable compatible-prefix caching\n"
            "                             (enabled by default)\n"
            "\n"
@@ -197,7 +198,9 @@ std::string serve_usage_text(const char* argv0) {
            "  --rope-yarn-factor is startup-fixed, finite [1,4] (default 1); it extends the\n"
            "  allowed ceiling only, not --max-context.\n"
            "  context cache defaults: device-state=max-concurrency, private=2x concurrency,\n"
-           "  shared=max(concurrency,4), anchors=2; host state=8 slots, host KV=8192 MiB\n"
+           "  shared=max(concurrency," +
+           std::to_string(kMaximumPreparedPromptCacheCandidatesPerRequest) +
+           "), anchors=4; host state=8 slots, host KV=8192 MiB\n"
            "  sampler defaults come from the loaded model and resolved thinking mode;\n"
            "  server flags and request fields override individual values.\n"
            "  --greedy forces temperature 0 (exact argmax).\n";
