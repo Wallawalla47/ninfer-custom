@@ -987,6 +987,7 @@ public:
                 FinishResult salvaged;
                 salvaged.status      = ConsumeStatus::Consumed;
                 salvaged.disposition = FinishDisposition::Catalogued;
+                salvaged.salvaged    = true;
                 salvaged.timings     = discarded.timings;
                 salvaged.speculative = std::move(discarded.speculative);
                 return salvaged;
