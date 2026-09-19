@@ -85,8 +85,7 @@ fixtures, and the per-component CMake reorganisation.
 
 - **Prefix-caching improvements** — a set of context-cache changes that raise the hit
   rate and reduce refills: salvaging prefilled context when a request is aborted (a
-  retry resumes from the salvaged frontier instead of root), protecting repeatedly hit
-  checkpoints from eviction (SLRU-style destruction floor), engine-automated anchoring of
+  retry resumes from the salvaged frontier instead of root), engine-automated anchoring of
   the last L message boundaries (`--max-long-anchors-per-continuation`), and a
   correctness fix that clears staged prefill bookkeeping when a lane is published.
 - **Ngram copy drafting above one concurrent request** — the local contribution here is

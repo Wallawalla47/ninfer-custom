@@ -43,7 +43,6 @@ public:
         std::uint32_t demand_mask          = 0;
         std::uint64_t rebuild_ns           = 0;
         std::uint64_t baseline_recovery_ns = 0;
-        std::uint64_t protected_value_ns   = 0;
     };
 
     struct Input {
@@ -342,7 +341,6 @@ private:
                 .rebuild_ns           = policy.rebuild_ns,
                 .baseline_recovery_ns = policy.baseline_recovery_ns,
                 .target_recovery_ns   = target_recovery,
-                .protected_value_ns   = policy.protected_value_ns,
             });
         }
         checkpoint_scratch_.push_back(ContextPortfolioCheckpointValue{
