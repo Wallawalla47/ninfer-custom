@@ -6,13 +6,14 @@
 // per warp and reads the activations straight from global (L2) memory. That is the right shape when
 // the weights dominate, and at T=1 they do. From about T=4 upward it stops being true: a warp-per-row
 // block moves `rows * T * K * 2` bytes of activation for one K pass while the weights are only
-// `rows * K * 5/8`, so at T=8 the activation traffic is 25x the weight traffic in bytes. Measured on
-// the GDN input projection's Q5 parent (12288x5120), the activation path sustains ~12.7 TB/s of
-// L2->L1 traffic on this device, which puts the T=8 pass at 79.5 us: 1.0 GB of activation against
-// 47.7 MB of weights that alone would need 34 us at the DRAM roofline. Every row re-reads the same
-// activation tile, so the fix is not a smaller tile but reuse: stage one activation slab in shared
-// memory per block and let all kRowsPerBlock warps read it. That divides the activation traffic by
-// kRowsPerBlock and puts the kernel back on the weight roofline.
+// `rows * K * 5/8`, so at T=8 the activation traffic is 25x the weight traffic in bytes. Fitting the
+// measured small-T times gives a *logical* effective activation-load bandwidth of about 12.7 TB/s
+// for the GDN Q5 parent (12288x5120) -- a derived figure from bytes over time, not a counter
+// reading, and L1/L2 hits mean it is not the throughput of one physical interface. Every row
+// re-reads the same activation tile, so the fix is not a smaller tile but reuse: stage one
+// activation slab in shared memory per block and let all kRowsPerBlock warps read it. That divides
+// the repeated activation loads by kRowsPerBlock, and at T=7/8 this shape measured the fastest of
+// the candidates tried (62.7 us at T=8 against 93.4 us for the row-split SIMT).
 //
 // Structure (deliberately the sibling kernel's, plus the staged slab):
 //   - one warp owns one output row; blockIdx.y selects a tile of kTt activation columns;
@@ -181,6 +182,10 @@ __launch_bounds__(kRowsPerBlock * 32) __global__
                 }
             }
         }
+        // The next iteration's issue rewrites the slot this slab was read from, and a 16-byte
+        // cp.async copy issued by one lane fills words another lane reads, so the warp has to be
+        // converged before that copy is issued. The warp-per-row kernel carries the same fence.
+        __syncwarp();
     }
 
     // Scalar tail: remaining groups read global memory directly, masked at k. Identical to the

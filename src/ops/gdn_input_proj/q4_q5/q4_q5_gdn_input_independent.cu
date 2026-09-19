@@ -71,8 +71,11 @@ void launch_q4_ksplit_exact(const Tensor& x, const Weight& weight, Tensor& out,
     using Geometry = Q4LinearGeometry<kQkRows, kHidden>;
     constexpr std::int32_t kTileCols = (Capacity + 7) / 8 * 8;
     const std::int32_t out_ld = static_cast<std::int32_t>(out.nb[1] / sizeof(__nv_bfloat16));
+    // The store's live-column count is the problem's actual column count, not the tile capacity:
+    // Capacity only sizes the tile, and the K-split kernel stages exactly the columns it is told are
+    // live, so the masked tail can never be written.
     const Q4KSplitStridedStore<false, 0> store{static_cast<__nv_bfloat16*>(out.data), out_ld,
-                                               nullptr, 0, Capacity};
+                                               nullptr, 0, x.ne[1]};
     q4_ksplit_mma_kernel<Geometry, kTileCols, Capacity, Q4KSplitStridedStore<false, 0>,
                          Q4KSplitIdentityRows, true>
         <<<kQkRows / Q4KSplitMmaSchedule::kRowsPerCta, Q4KSplitMmaSchedule::kThreads, 0, stream>>>(
@@ -95,8 +98,20 @@ void launch_q4_ksplit_band(const Tensor& x, const Weight& weight, Tensor& out,
     case 8:
         launch_q4_ksplit_exact<8>(x, weight, out, stream);
         return;
+    case 9:
+        launch_q4_ksplit_exact<9>(x, weight, out, stream);
+        return;
+    case 10:
+        launch_q4_ksplit_exact<10>(x, weight, out, stream);
+        return;
+    case 11:
+        launch_q4_ksplit_exact<11>(x, weight, out, stream);
+        return;
+    case 12:
+        launch_q4_ksplit_exact<12>(x, weight, out, stream);
+        return;
     default:
-        throw std::invalid_argument("Q4/Q5 GDN K-split band covers T in [7,8]");
+        throw std::invalid_argument("Q4/Q5 GDN K-split band covers T in [7,12]");
     }
 }
 
@@ -112,10 +127,15 @@ void launch_q4(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t 
         return;
     case 7:
     case 8:
+    case 9:
+    case 10:
+    case 11:
+    case 12:
         // The K-split MMA arms all 8 warps of a CTA onto K instead of waiting out the weight stream
-        // of a row, which measured 21.8 us against the row-split SIMT's 32-34 us for this parent
-        // (probe, cold, median of 20). T=2..6 keep the SIMT tile: there the K-split's wider column
-        // tile wastes more MMA work than it saves.
+        // of a row. Complete-op measurement (both parents, one graph, one probe run per column count)
+        // at T=9..12: the split form with this parent is 101.6-105.7 us against 120.1 us for the
+        // grouped kernel R6 chose, while at T=13 the grouped kernel wins again (120.1 against 126.2),
+        // so the band ends at 12.
         launch_q4_ksplit_band(x, weight, out, stream);
         return;
     default:
@@ -203,9 +223,9 @@ void launch_q5_split4_exact(const Tensor& x, const Weight& weight, Tensor& value
     }
 }
 
-void launch_q5_simt_r8_c8(const Tensor& x, const Weight& weight, Tensor& value, Tensor& z,
-                          cudaStream_t stream) {
-    constexpr int kColsPerTile  = 8;
+template <int kColsPerTile>
+void launch_q5_simt_cols(const Tensor& x, const Weight& weight, Tensor& value, Tensor& z,
+                         cudaStream_t stream) {
     constexpr int kRowsPerBlock = 8;
     constexpr int kStages       = 2;
     constexpr int kThreads      = kRowsPerBlock * 32;
@@ -236,13 +256,23 @@ void launch_q5(const Tensor& x, const Weight& weight, Tensor& value, Tensor& z,
     if (x.ne[1] <= 8) {
         // T=7/8: the row-block kernel stages one 1024-value activation slab per block in shared
         // memory and lets all kRowsPerBlock warps read it, so the activation traffic drops by
-        // kRowsPerBlock. At T=8 that moved this side from 93.4 us (row-split SIMT, activation
-        // bound at ~12.7 TB/s of L1/L2 traffic) to 62.7 us, which is the weight roofline.
+        // kRowsPerBlock. At T=8 that moved this side from 93.4 us (row-split SIMT, activation bound
+        // by repeated activation traffic) to 62.7 us.
         launch_q5_rowblock(x, weight, value, z, stream);
         return;
     }
+    if (x.ne[1] <= 12) {
+        // T=9..12: this side stays on the narrow-column SIMT tile while the Q4 parent moves to the
+        // K-split, which is what makes the split form faster than the grouped kernel here. Measured
+        // as a complete op at T=9..12, a 4-column tile gives 101.6-105.7 us against 163.1-165.1 us for
+        // an 8-column tile and 109.8-126.7 us for the row-block shape. The 4-column tile is the
+        // fastest of the three that were measured; the measurement does not single out one cause for
+        // the difference between them.
+        launch_q5_simt_cols<4>(x, weight, value, z, stream);
+        return;
+    }
     if (x.ne[1] <= 15) {
-        launch_q5_simt_r8_c8(x, weight, value, z, stream);
+        launch_q5_simt_cols<8>(x, weight, value, z, stream);
         return;
     }
     throw std::invalid_argument("Q4/Q5 GDN independent launch requires T in [1,15]");

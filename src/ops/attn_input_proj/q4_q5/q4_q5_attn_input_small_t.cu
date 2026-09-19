@@ -73,8 +73,10 @@ void launch_q4_ksplit_exact(const Tensor& x, const Weight& weight, Tensor& q, Te
     using Geometry = Q4LinearGeometry<kParentRows, kHidden>;
     constexpr std::int32_t kTileCols = (Capacity + 7) / 8 * 8;
     using Store = Q4KSplitStridedStore<true, kSplitRow>;
+    // The store's live-column count is the problem's actual column count: Capacity only sizes the
+    // tile, and the K-split kernel stages exactly the columns it is told are live.
     const Store store{static_cast<__nv_bfloat16*>(q.data), q.ne[0],
-                      static_cast<__nv_bfloat16*>(key.data), key.ne[0], Capacity};
+                      static_cast<__nv_bfloat16*>(key.data), key.ne[0], x.ne[1]};
     q4_ksplit_mma_kernel<Geometry, kTileCols, Capacity, Store, Q4KSplitIdentityRows, true>
         <<<kParentRows / Q4KSplitMmaSchedule::kRowsPerCta, Q4KSplitMmaSchedule::kThreads, 0,
            stream>>>(static_cast<const __nv_bfloat16*>(x.data),
@@ -96,8 +98,20 @@ void launch_q4_ksplit_band(const Tensor& x, const Weight& weight, Tensor& q, Ten
     case 8:
         launch_q4_ksplit_exact<8>(x, weight, q, key, stream);
         return;
+    case 9:
+        launch_q4_ksplit_exact<9>(x, weight, q, key, stream);
+        return;
+    case 10:
+        launch_q4_ksplit_exact<10>(x, weight, q, key, stream);
+        return;
+    case 11:
+        launch_q4_ksplit_exact<11>(x, weight, q, key, stream);
+        return;
+    case 12:
+        launch_q4_ksplit_exact<12>(x, weight, q, key, stream);
+        return;
     default:
-        throw std::invalid_argument("attention Q4 K-split band covers T in [7,8]");
+        throw std::invalid_argument("attention Q4 K-split band covers T in [7,12]");
     }
 }
 
@@ -108,8 +122,17 @@ void launch_q4(const Tensor& x, const Weight& weight, Tensor& q, Tensor& key, cu
         return;
     case 7:
     case 8:
-        // See the GDN sibling: for these two column counts the K-split MMA beats the row-split
-        // SIMT tile on both parents (21.8-23.8 us against 42-48 us, cold, median of 20).
+    case 9:
+    case 10:
+    case 11:
+    case 12:
+        // K-split for the Q4 parent across the whole parent-split range. Complete-op measurement
+        // (both parents launched, all four outputs, one graph, one probe run per column count):
+        // 73.0-77.6 us at T=9..12 against 100.1-105.7 us for the row-split SIMT that R0 used there,
+        // and 107.8-108.3 us for the grouped form the resolver switches to at T=13. The resolver
+        // boundary at 13 is right for the grouped-vs-row-split question, but it hid this: the split
+        // form with a K-split Q4 parent is 24-29% faster than both. T=2..6 keep the SIMT tile, where
+        // a 16-wide K-split tile would waste more MMA work than it saves.
         launch_q4_ksplit_band(x, weight, q, key, stream);
         return;
     case 2:
@@ -117,10 +140,6 @@ void launch_q4(const Tensor& x, const Weight& weight, Tensor& q, Tensor& key, cu
     case 4:
     case 5:
     case 6:
-    case 9:
-    case 10:
-    case 11:
-    case 12:
         launch_q4_simt_route<Q4AttnSimtR8C4Schedule>(x, weight, q, key, stream);
         return;
     default:
@@ -233,8 +252,9 @@ void launch_q5(const Tensor& x, const Weight& weight, Tensor& gate, Tensor& valu
         return;
     }
     if (x.ne[1] <= 8) {
-        // See the GDN sibling: at T=7/8 this side is activation bound, and staging the activation
-        // slab per block takes it to the weight roofline (42.2 us against 64.8 us at T=7).
+        // See the GDN sibling: at T=7/8 this side is bound by repeated activation loads, and staging
+        // the activation slab per block measured 42.2 us against 64.8 us at T=7 - the best of the
+        // candidates tried here.
         launch_q5_rowblock(x, weight, gate, value, stream);
         return;
     }
