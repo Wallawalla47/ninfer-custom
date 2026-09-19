@@ -21,13 +21,20 @@ the "Upstream README" heading.
   `src/models` layout, which replaced the `src/targets` layout the PR was written for.
 - **PR #197** — honour `ignore_eos` on chat completions, by
   [Thireus](https://github.com/Thireus).
+- **PR #264** — take a partial last M tile in the fused SwiGLU TMA route, by Michael
+  Dementii.
 - **PR #268** — fold the sigmoid gate into the causal reduce epilogue, by Michael
   Dementii.
-
-Pull requests #255, #257, #262, #264, and #266 — merged into this branch while it was
-being assembled — have since landed in upstream `master`, so they are no longer changes in
-this build. For PR #264 the local Windows TMA descriptor-staging adaptation is still
-applied on top (see Platform below); the rest are upstream text verbatim.
+- **PR #273** — register the text profile of `rmsnorm_rope` and route to it, by Michael
+  Dementii.
+- **PR #281** — correct the Q5 parent-shape explanations and route table, by
+  [Minnnn](https://github.com/Minnnn).
+- **PR #282** — read GGUF (any ggml quantisation level) as a conversion source, by
+  [giveen](https://github.com/giveen).
+- **PR #284** — tune the Q6 34,816×5120 dispatch and report the curve, by
+  [bingchengcc](https://github.com/bingchengcc).
+- **PR #292** — ladder the Q5 linear K-split capacity to the token count, by
+  [giveen](https://github.com/giveen).
 
 Recurring merges from upstream `master` additionally bring in ongoing kernel and build
 work: NVFP4/Q8/sparse-MoE dispatch tuning, whole-tile W4A4 TMA scale routing, the real
@@ -62,6 +69,9 @@ fixtures, and the per-component CMake reorganisation.
 - **PNG image support in the vision path** — the prebuilt Windows vcpkg FFmpeg tree ships
   without the PNG decoder, so a native PNG decode path (`NINFER_MEDIA_NATIVE_PNG`) was
   added; the vision path accepts `.png` images on these builds.
+- **Converter recipe references on Windows** — the `--recipe FILE[:function]` reference
+  treats a colon inside the path (such as a Windows drive letter) as part of the path; only
+  a colon followed by a bare function name selects the entry function.
 
 **Operability and UX**
 
@@ -133,7 +143,9 @@ A big thank you to all the contributors to upstream NInfer —
 [Thireus](https://github.com/Thireus),
 [remesis](https://github.com/remesis),
 [Valeriy Selitskiy (iamwavecut)](https://github.com/iamwavecut),
-[Hector Ramon Jimenez (hecrj)](https://github.com/hecrj), and everyone else whose pull
+[Hector Ramon Jimenez (hecrj)](https://github.com/hecrj),
+[giveen](https://github.com/giveen),
+[bingchengcc](https://github.com/bingchengcc), and everyone else whose pull
 requests, reviews and commits made this fork possible — and a particular thank you to
 **[Neroued](https://github.com/Neroued)** for creating NInfer, maintaining upstream so
 well, and for the work this branch builds on.
@@ -144,7 +156,7 @@ well, and for the work this branch builds on.
 
 Everything below is a **direct, unmodified copy of the upstream
 [NInfer README](https://github.com/Neroued/ninfer/blob/master/README.md)**, as of the
-latest upstream sync (`f76e19c0` on `origin/master`).
+latest upstream sync (`9e163eee` on `origin/master`).
 
 # NInfer
 
