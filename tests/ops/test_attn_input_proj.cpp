@@ -1,3 +1,5 @@
+#include <array>
+
 #include "core/weight.h"
 #include "ninfer/ops/attn_input_proj.h"
 #include "ninfer/ops/weight_input.h"
