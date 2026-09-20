@@ -125,6 +125,10 @@ std::string serve_usage_text(const char* argv0) {
            "  --max-shared-prefixes N          bounded shared prefix catalogs\n"
            "                                    (default = max(concurrency," +
            std::to_string(kMaximumPreparedPromptCacheCandidatesPerRequest) + "))\n"
+           "  --preserved-recent-prefixes N   eviction-immune recent conversation prefixes\n"
+           "                                  (default 0 = off; the most recent N private\n"
+           "                                  prefixes are kept out of eviction until nothing\n"
+           "                                  else remains; recommend ~ --max-concurrency + 1)\n"
            "  --no-prefix-reuse          disable compatible-prefix caching\n"
            "                             (enabled by default)\n"
            "\n"
@@ -354,6 +358,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                 parse_nonnegative_int(require_value("--max-long-anchors-per-continuation"),
                                       "max-long-anchors-per-continuation"));
             context_capacity_explicit = true;
+        } else if (arg == "--preserved-recent-prefixes") {
+            options.context_cache.preserved_recent_prefixes = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--preserved-recent-prefixes"),
+                                      "preserved-recent-prefixes"));
         } else if (arg == "--request-log-jsonl") {
             options.request_log_jsonl = require_value("--request-log-jsonl");
             if (options.request_log_jsonl.empty()) {
