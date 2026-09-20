@@ -54,12 +54,20 @@ bool dflash_target_uses_chunked_small_t(std::uint32_t draft_window, std::uint32_
 std::vector<GraphExecutionProfile> ordinary_graph_profiles(std::uint32_t capacity) {
     // E+1 is the one-token visible window. Early ranges limit empty producer CTAs; later ranges
     // follow measured split-policy transitions until the producer grid reaches its fixed cap.
-    return graph_profiles_through(capacity - 1, {127, 511, 2047, 4095, 8197, 16389, 32767});
+    auto profiles = graph_profiles_through(capacity - 1, {127, 511, 2047, 4095, 8197, 16389, 32767});
+    // As with MTP, each per-frontier-range profile captures a distinct CUDA graph topology, so
+    // give each a unique topology class to keep instantiate_graph_family from calling
+    // cudaGraphExecUpdate across incompatible topologies.
+    for (std::size_t i = 0; i < profiles.size(); ++i) {
+        profiles[i].topology_class = static_cast<std::uint32_t>(i);
+    }
+    return profiles;
 }
 
 std::vector<GraphExecutionProfile> mtp_graph_profiles(std::uint32_t capacity,
                                                       std::uint32_t draft_window,
                                                       std::uint32_t neural_drafts) {
+    (void)neural_drafts;
     if (draft_window == 0 || capacity == 0) { return {}; }
     if (draft_window > 5) {
         // Wide verification uses the same bounded attention tiers as DFlash2.
@@ -93,11 +101,14 @@ std::vector<GraphExecutionProfile> mtp_graph_profiles(std::uint32_t capacity,
     std::sort(ends.begin(), ends.end());
     ends.erase(std::unique(ends.begin(), ends.end()), ends.end());
     auto profiles = graph_profiles_through(capacity - 1, ends);
-    if (draft_window != neural_drafts) {
-        // Unequal verification/next-draft widths cannot share equal-width graphs.
-        for (std::size_t i = 0; i < profiles.size(); ++i) {
-            profiles[i].topology_class = static_cast<std::uint32_t>(i);
-        }
+    // Every per-frontier-range profile captures a distinct CUDA graph topology: the attention
+    // envelopes' visible extent changes with the range's max frontier, so cudaGraphExecUpdate
+    // cannot migrate one profile's executable to another (it reports
+    // cudaGraphExecUpdateErrorDifferentTopology). Assign a unique topology class per profile so
+    // instantiate_graph_family instantiates a separate executable for each, matching the
+    // draft_window > 5 path above.
+    for (std::size_t i = 0; i < profiles.size(); ++i) {
+        profiles[i].topology_class = static_cast<std::uint32_t>(i);
     }
     return profiles;
 }
