@@ -27,9 +27,11 @@ unsigned timeEndPeriod(unsigned);
 namespace {
 
 // Windows' default system timer quantum (~15.6ms) stretches the fake's 1ms pressure-assessment
-// sleep to ~16ms, exhausting the planner's 5ms economic search budget before the deep reuse
-// closure is explored. Raise the timing resolution for the process lifetime so sleep_for
-// honors the upstream-intended durations.
+// sleep to ~16ms, distorting the wall-clock elapsed time the planner's timing-based search
+// budget consumes. That window is now cost-scaled (5 ms floor up to a 250 ms cap) rather than
+// flat, but at the floor a stretched 16 ms sleep still outruns the budget, so the intended
+// durations must be honored. Raise the timing resolution for the process lifetime so sleep_for
+// respects them and the budget-dependent tests observe the timings they encode.
 struct TimerResolution {
     bool raised = false;
 #ifdef _WIN32
@@ -3086,7 +3088,12 @@ void test_guided_pressure_reaches_deep_retention_before_maximal_fallback() {
                           2000U + owner_id) == program.started_action_ids.end(),
                 "guided pressure search evicted a parked owner");
     }
-    require(program.pressure_target_assessments <= 8,
+    // The search grant is now cost-scaled (5 ms floor up to a 250 ms cap) instead of a flat
+    // 5 ms, so the guided search has more room before its TimeBudget stop and reaches the deep
+    // retention a few assessments later than under the old cap. The bound only needs to keep it
+    // short of a full breadth-first sweep (which would exhaust the whole grant), so this is a
+    // small relaxation, not a removal of the efficiency check.
+    require(program.pressure_target_assessments <= 16,
             "guided pressure search returned to eager breadth-first assessment");
 }
 
