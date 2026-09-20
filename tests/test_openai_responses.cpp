@@ -29,6 +29,28 @@ int check(bool condition, const std::string& message) {
     return 1;
 }
 
+// RequestJson is an ordered_json, whose object equality compares key pairs in insertion
+// order. The response encoder serialises with plain nlohmann::json (sorted keys), so the
+// wire order of a field is not a contract; compare objects by key set instead.
+bool json_unordered_eq(const Json& a, const Json& b) {
+    if (a.is_object() && b.is_object()) {
+        if (a.size() != b.size()) { return false; }
+        for (const auto& [key, value] : a.items()) {
+            const auto found = b.find(key);
+            if (found == b.end() || !json_unordered_eq(value, *found)) { return false; }
+        }
+        return true;
+    }
+    if (a.is_array() && b.is_array()) {
+        if (a.size() != b.size()) { return false; }
+        for (std::size_t index = 0; index < a.size(); ++index) {
+            if (!json_unordered_eq(a[index], b[index])) { return false; }
+        }
+        return true;
+    }
+    return a == b;
+}
+
 RequestLimits limits() {
     RequestLimits value;
     value.default_max_tokens = 256;
@@ -932,7 +954,7 @@ int test_response_object() {
                       "completed response has a completion timestamp");
     failures +=
         check(response.at("reasoning").at("summary") == "concise" &&
-                  response.at("output")[0].at("summary") == summary &&
+                  json_unordered_eq(response.at("output")[0].at("summary"), summary) &&
                   response.at("output")[0].at("content")[0].at("text") == "thought" &&
                   response.at("output")[0].at("encrypted_content") == "thought",
               "reasoning placeholders preserve raw reasoning in both replays");
@@ -1036,14 +1058,14 @@ int test_sse_sequence_and_failures() {
         if (type == "response.output_item.added" && payload.at("item").at("type") == "reasoning") {
             reasoning_id = payload.at("item").at("id").get<std::string>();
             failures += check(payload.at("output_index") == 0 &&
-                                  payload.at("item").at("summary") == summary &&
+                                  json_unordered_eq(payload.at("item").at("summary"), summary) &&
                                   !payload.at("item").contains("encrypted_content"),
                               "reasoning output_item.added defers raw encrypted content");
         } else if (type == "response.output_item.done" &&
                    payload.at("item").at("type") == "reasoning") {
             failures += check(payload.at("output_index") == 0 &&
                                   payload.at("item").at("id") == reasoning_id &&
-                                  payload.at("item").at("summary") == summary &&
+                                  json_unordered_eq(payload.at("item").at("summary"), summary) &&
                                   payload.at("item").at("encrypted_content") == "thought",
                               "reasoning output_item.done carries the complete raw mirror");
         } else if (type.starts_with("response.reasoning_summary_")) {
@@ -1053,7 +1075,8 @@ int test_sse_sequence_and_failures() {
                       "reasoning summary events retain stable Item indices");
             if (type == "response.reasoning_summary_part.added") {
                 failures +=
-                    check(payload.at("part") == Json{{"type", "summary_text"}, {"text", ""}},
+                    check(json_unordered_eq(payload.at("part"),
+                                            Json{{"type", "summary_text"}, {"text", ""}}),
                           "reasoning summary part starts empty");
             } else if (type == "response.reasoning_summary_text.delta") {
                 summary_deltas += payload.at("delta").get<std::string>();
@@ -1061,7 +1084,7 @@ int test_sse_sequence_and_failures() {
                 failures += check(payload.at("text") == kReasoningSummaryPlaceholder,
                                   "reasoning summary text done carries the placeholder");
             } else if (type == "response.reasoning_summary_part.done") {
-                failures += check(payload.at("part") == summary.at(0),
+                failures += check(json_unordered_eq(payload.at("part"), summary.at(0)),
                                   "reasoning summary part done carries the placeholder");
             }
         }
@@ -1096,7 +1119,9 @@ int test_sse_sequence_and_failures() {
         parse_event(wire.front()).at("type") == "response.created" &&
             parse_event(wire.back()).at("type") == "response.completed" &&
             parse_event(wire.back()).at("response").at("reasoning").at("summary") == "detailed" &&
-            parse_event(wire.back()).at("response").at("output")[0].at("summary") == summary &&
+            json_unordered_eq(
+                parse_event(wire.back()).at("response").at("output")[0].at("summary"),
+                summary) &&
             parse_event(wire.back())
                     .at("response")
                     .at("output")[0]
