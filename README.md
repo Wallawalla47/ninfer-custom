@@ -104,6 +104,32 @@ fixtures, and the per-component CMake reorganisation.
   retry resumes from the salvaged frontier instead of root), engine-automated anchoring of
   the last L message boundaries (`--max-long-anchors-per-continuation`), and a
   correctness fix that clears staged prefill bookkeeping when a lane is published.
+- **`--preserved-recent-prefixes N`** — keep the N most recent private conversation
+  prefixes protected from cache pressure: they are never evicted by the under-pressure
+  materialization search as long as there is space available (they may still be demoted
+  to host, freeing device KV but keeping the host copy, so the active context always
+  fits). If that search finds no usable solution within the materialization-search
+  budget, the escape-hatch fallback no longer jumps straight to evicting everything from
+  the cache — it evicts the least-recently-used prefixes, one rung at a time (demoting
+  the newer preserved ones to host), until there is enough space for materialization;
+  the clear-all target remains only as the guaranteed liveness backstop.
+- **Cost-scaled materialization search budget** — addresses the crux of
+  [Neroued/ninfer#229](https://github.com/Neroued/ninfer/issues/229): the flat 5 ms
+  under-pressure materialization-search budget is not sufficient — it only manages to
+  get through searching about 10 targets before it times out, so valuable completion
+  plans are missed. Implements the solution suggested by Gene0Liu: scale the
+  materialization search budget with the number of targets, subject to a 250 ms cap
+  (which is almost always hit) — an expensive incumbent earns up to the full 250 ms
+  search, a cheap one keeps the 5 ms floor.
+- **Automatic shared-prefix catalog reclaim** — looks to resolve
+  [Neroued/ninfer#251](https://github.com/Neroued/ninfer/issues/251): the shared
+  stable-prefix catalog saturated and did not evict its least-recently-used entries —
+  with no eviction path for automatic-evidence traffic, once every
+  `--max-shared-prefixes` slot was resident, later automatic candidates were dropped and
+  their shared-prefix reuse froze until an engine restart. Implements the solution
+  suggested by albertov: reclaim the least-recently-used eligible automatic entry when a
+  candidate finds no vacant slot, and count reclaimable slots as publication slack so the
+  materialization selection stops discarding automatic candidates at saturation.
 - **Ngram copy drafting above one concurrent request** — the local contribution here is
   the C>1 extension of remesis's C=1 implementation: it makes ngram copy drafting work
   with more than one concurrent request across MTP/DFlash/DFlash2, with a per-lane
@@ -137,8 +163,11 @@ Configuration used for running it (single 32 GB GPU — stop any other resident 
 first):
 
 ```bat
-ninfer-serve.exe qwen3_8_27b_nvfp4-quasar-proposal.ninfer --host 127.0.0.1 --port 8080 --max-context 240000 --max-concurrency 5 --spec dflash2 --draft-tokens 7 --lm-head-draft --ngram-draft-tokens 15 --ngram-min-match 12 --kv-dtype int8 --preserve-thinking --host-kv-mib 42000 --pending-timeout-ms 900000 --prefill-chunk 2048 --kv-capacity auto --kv-headroom-mib 0 --log-colours on --host-state-slots 64 --max-private-continuations 64 --max-long-anchors-per-continuation 8 --max-shared-prefixes 64 --ngram-archive-mib 2048 --ngram-session-mib 256 --ngram-native-sessions --cuda-graph-allowance-mib 500 --request-log-jsonl log.json
+ninfer-serve.exe "E:\NInfer-Deploy-V3-output\qwen3_8_27b_nvfp4-quasar-proposal.ninfer" --host 127.0.0.1 --port 8080 --max-context 240000 --max-concurrency 2 --spec dflash2 --draft-tokens 7 --lm-head-draft --ngram-draft-tokens 15 --ngram-min-match 12 --kv-dtype int8 --preserve-thinking --host-kv-mib 30000 --pending-timeout-ms 900000 --prefill-chunk 2048 --kv-capacity auto --kv-headroom-mib 0 --log-colours on --host-state-slots 256 --max-private-continuations 32 --max-long-anchors-per-continuation 8 --max-shared-prefixes 32 --preserved-recent-prefixes 5 --ngram-archive-mib 2048 --ngram-session-mib 256 --ngram-native-sessions --cuda-graph-allowance-mib 500 --request-log-jsonl log.json --default-thinking-budget 32000 --thinking-budget-message "I'm done thinking. Time to act:"
 ```
+
+This is the `LaunchQwen3.8-27B-quasar-dflash2-ngram.bat` launch configuration, plus
+`--preserved-recent-prefixes 5`.
 
 ## Thanks
 
