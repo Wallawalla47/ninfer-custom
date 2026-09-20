@@ -250,6 +250,26 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                        "causal score hidden staging");
     }
     qwen3_5::complete_round_state_layout(builder, out.round);
+    // A batch>1 frame cannot be narrowed to a per-family window (single_row_prefix is C1-only),
+    // so when the two family windows differ and the engine admits a multi-row batch, the narrower
+    // family's single-row profile and rounds run on a dedicated single-row frame. That frame must
+    // be bound at the frame's native width (plan.draft_window), NOT the narrower family window:
+    // the append-context path (prepare_ragged_prefix over pending_features) is hardwired to the
+    // frame's append_positions width, which must equal the program-level pending_features width
+    // (draft_window + 1). Per-round narrowing to a family's own window happens in the body via
+    // single_row_prefix(k), which deliberately leaves the append-context geometry at native width.
+    if (is_masked_draft_backend(plan.speculative_backend) && !plan.causal_scoring &&
+        plan.max_concurrency > 1 && plan.ngram_draft_window != 0 &&
+        plan.neural_draft_window != plan.ngram_draft_window) {
+        out.round_single = qwen3_5::begin_round_state_layout(
+            builder, qwen3_5::RoundStateSpec{.hidden         = dimension(config.hidden_size),
+                                             .output_rows    = dimension(config.vocab_size),
+                                             .batch_capacity = 1,
+                                             .draft_window   = plan.draft_window,
+                                             .backend        = plan.speculative_backend,
+                                             .causal_scoring = plan.causal_scoring});
+        qwen3_5::complete_round_state_layout(builder, *out.round_single);
+    }
     if (!plan.causal_scoring) {
         out.token_counts        = add_tensor(builder, DType::I32,
                                              {dimension(parameters.model.resources().public_token_count),
@@ -895,28 +915,33 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
                 checked_mul(family_allowance(drafts, ar_depth), impl->max_concurrency,
                             "MTP exact-b graph allowance");
         } else {
-            // Both DFlash families are captured at the frame's native width.
-            const std::uint32_t drafts = impl->draft_window;
-            const std::uint32_t families = impl->ngram_draft_window != 0 ? 2U : 1U;
-            const auto class_allowance = [&](std::uint32_t batch_size, std::uint32_t draft_width) {
+            // Each DFlash family's single-row profile is captured at the family's own window; a
+            // batch>1 frame cannot be narrowed, so those profiles are captured at the frame's
+            // native width.
+            const auto class_allowance = [&](std::uint32_t batch_size, std::uint32_t window) {
+                const std::uint32_t width = batch_size == 1 ? window : impl->draft_window;
                 const auto profiles = dflash_graph_profiles(impl->speculative_backend,
-                                                            impl->capacity, draft_width, batch_size);
+                                                            impl->capacity, width, batch_size);
                 return graph_topology_allowance(
                     profiles,
                     [&](GraphExecutionProfile profile) {
                         const std::uint64_t final_visible = std::min<std::uint64_t>(
                             impl->capacity,
-                            static_cast<std::uint64_t>(profile.max) + draft_width + 1ULL);
+                            static_cast<std::uint64_t>(profile.max) + width + 1ULL);
                         return (final_visible <= 4096 ? 64ULL : 96ULL) * kMiB;
                     },
                     "DFlash graph allowance");
             };
             for (std::uint32_t batch_size = 1; batch_size <= impl->max_concurrency; ++batch_size) {
-                for (std::uint32_t family = 0; family < families; ++family) {
-                    impl->graph_allowance_bytes =
-                        checked_add(impl->graph_allowance_bytes,
-                                    class_allowance(batch_size, drafts),
-                                    "DFlash exact-b graph allowance");
+                impl->graph_allowance_bytes = checked_add(
+                    impl->graph_allowance_bytes,
+                    class_allowance(batch_size, impl->neural_draft_window),
+                    "DFlash exact-b graph allowance");
+                if (impl->ngram_draft_window != 0) {
+                    impl->graph_allowance_bytes = checked_add(
+                        impl->graph_allowance_bytes,
+                        class_allowance(batch_size, impl->ngram_draft_window),
+                        "DFlash exact-b graph allowance");
                 }
             }
         }

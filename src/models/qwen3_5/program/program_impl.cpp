@@ -218,6 +218,9 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     }
 
     io = qwen3_5::RoundState(backing, plan.persistent.round);
+    if (plan.persistent.round_single) {
+        round_single.emplace(backing, *plan.persistent.round_single);
+    }
     if (io.mtp.has_value() != (speculative_backend == SpeculativeBackend::Mtp)) {
         throw std::logic_error("round-state MTP extension does not match the sequence plan");
     }
@@ -233,6 +236,16 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     }
     if (io.dflash_decode.has_value() != is_masked_draft_backend(speculative_backend)) {
         throw std::logic_error("DFlash decode frame does not match the sequence plan");
+    }
+    const bool single_row_frame_required =
+        is_masked_draft_backend(speculative_backend) && !causal_scoring &&
+        max_concurrency > 1 && ngram_draft_window != 0 &&
+        neural_draft_window != ngram_draft_window;
+    if (round_single.has_value() != single_row_frame_required) {
+        throw std::logic_error("single-row DFlash frame does not match the sequence plan");
+    }
+    if (round_single && !round_single->dflash_decode.has_value()) {
+        throw std::logic_error("single-row DFlash decode frame does not match the sequence plan");
     }
     prefill_hidden = plan.persistent.prefill_hidden.bind(backing);
     if (plan.persistent.score_hidden) {

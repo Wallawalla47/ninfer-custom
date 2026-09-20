@@ -607,6 +607,10 @@ public:
     std::optional<ops::GdnReplayFoldPlan> replay_fold;
     std::optional<DFlashPersistentState> dflash;
     qwen3_5::RoundState io;
+    // Single-row DFlash decode frame at the frame's native width (plan.draft_window). Hosts the
+    // narrower family's single-row graph profiles and rounds, which run narrowed via
+    // single_row_prefix, when the batch>1 native frame cannot be narrowed to that window.
+    std::optional<qwen3_5::RoundState> round_single;
     Tensor prefill_hidden;
     std::optional<Tensor> score_hidden;
     Tensor sampling_config;

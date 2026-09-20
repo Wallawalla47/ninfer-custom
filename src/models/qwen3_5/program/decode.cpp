@@ -690,14 +690,22 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             break;
         }
     }
-    // Frame and graph family are batch-wide: the frame is allocated at plan.draft_window and every
-    // round verifies at that native width. A round with at least one copy proposal replays the
-    // ngram family (which loads the per-row payload); an all-neural round replays the neural
-    // family (which runs the drafter). Rows without a proposal in an ngram round are given an
-    // empty payload and a zero extent, so they decode one token for that round.
-    const std::uint32_t verify_drafts   = draft_window;
+    // The frame is allocated at plan.draft_window (the wider of the family windows). A
+    // single-row round verifies at its family's own window, on the single-row frame when that
+    // window is narrower than the frame's native width, which a batch>1 frame cannot provide;
+    // a batch>1 round consumes the frame at its native width. A round with at least one copy
+    // proposal replays the ngram family (which loads the per-row payload); an all-neural round
+    // replays the neural family (which runs the drafter). The per-row proposal extent limits
+    // accepted drafts to the family's window either way; rows without a proposal in an ngram
+    // round are given an empty payload and a zero extent, so they decode one token for that
+    // round.
     const std::uint32_t proposal_drafts = any_ngram ? ngram_draft_window : neural_draft_window;
+    const std::uint32_t verify_drafts   = lanes.size() == 1 ? proposal_drafts : draft_window;
     auto& graph_family                  = any_ngram ? ngram_graphs : dflash_graphs;
+    qwen3_5::DFlashDecodeState& frame =
+        (lanes.size() == 1 && proposal_drafts < draft_window && round_single.has_value())
+            ? *round_single->dflash_decode
+            : *io.dflash_decode;
     for (std::size_t row = 0; any_ngram && row < lanes.size(); ++row) {
         const std::uint32_t row_extent = static_cast<std::uint32_t>(matches[row].tokens.size());
         for (std::uint32_t step = 0; step < verify_drafts; ++step) {
@@ -818,7 +826,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
              proposal_head},
             decoder->text_kv,
             *dflash,
-            *io.dflash_decode,
+            frame,
             *dflash_host_ingress,
             *dflash_host_egress,
             state_images->continuation_hidden_store()};
