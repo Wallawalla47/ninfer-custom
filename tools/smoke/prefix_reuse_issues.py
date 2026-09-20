@@ -11,9 +11,15 @@ Covered changes:
   3. Issue #251 shared-catalog saturation reclaim  -> scenario "shared-saturation-reclaim"
      plus "shared-replacement" as the adjacent explicit-candidate capacity path.
 
+The test binaries are resolved from <build-dir>/tests/<config>. When --build-config is
+omitted, the config whose e2e binary was built most recently (by mtime) is used, and the
+script warns if that binary predates the newest commit touching the watched cache sources
+(so a stale Release build that predates a recent fix is flagged instead of silently run).
+
 Usage:
   python tools/smoke/prefix_reuse_issues.py \
-      --artifact E:/NInfer-Deploy-V3-output/qwen3_8_27b_nvfp4-quasar-proposal.ninfer
+      --artifact E:/NInfer-Deploy-V3-output/qwen3_8_27b_nvfp4-quasar-proposal.ninfer \
+      [--build-dir E:/NInfer-V3/build-windows] [--build-config Debug]
 """
 
 from __future__ import annotations
@@ -23,15 +29,98 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-BUILD_TESTS = REPO / "build-windows" / "tests" / "Release"
-E2E_BINARY = BUILD_TESTS / "ninfer_qwen3_5_prefix_real_test.exe"
-UNIT_BINARY = BUILD_TESTS / "ninfer_resource_manager_test.exe"
+DEFAULT_BUILD_DIR = REPO / "build-windows"
+E2E_BINARY_NAME = "ninfer_qwen3_5_prefix_real_test.exe"
+UNIT_BINARY_NAME = "ninfer_resource_manager_test.exe"
 DEFAULT_ARTIFACT = r"E:\NInfer-Deploy-V3-output\qwen3_8_27b_nvfp4-quasar-proposal.ninfer"
+
+# Source files whose newest change gates whether a test binary is stale: a binary built
+# before the latest edit to any of these will not include that change (e.g. the crash fix
+# bb76238b and the issue #251 reclaim fix).
+STALENESS_WATCHED_SOURCES = [
+    "src/runtime/engine/context_cache/resource_manager.h",
+    "src/models/qwen3_5/program/transactions/commit.cpp",
+    "src/models/qwen3_5/program/transactions/capture.cpp",
+    "src/models/qwen3_5/program/planning/graph_profiles.cpp",
+]
+
+DEFAULT_LOG = REPO / ".qwen" / "prefix_smoke.log"
+
+
+class _Tee:
+    """Write to the original stdout and a durable log file simultaneously.
+
+    The file is flushed on every write so the log is always current and readable even
+    mid-run, independent of how the process is observed (monitor, shell, nohup).
+    """
+
+    def __init__(self, stream, path: Path):
+        self._stream = stream
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = open(path, "a", encoding="utf-8")
+
+    def write(self, data):
+        self._stream.write(data)
+        self._file.write(data)
+        self._file.flush()
+
+    def flush(self):
+        self._stream.flush()
+        self._file.flush()
+
+    def close(self):
+        try:
+            self._file.close()
+        except OSError:
+            pass
+
+
+def newest_source_commit_unix_time() -> int | None:
+    """Return the unix time of the newest commit touching the watched sources, or None."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(REPO), "log", "-1", "--format=%ct", *STALENESS_WATCHED_SOURCES],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if out.returncode != 0 or not (out.stdout or "").strip():
+            return None
+        return int(out.stdout.strip())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def resolve_test_binaries(
+    build_dir: Path, build_config: str | None
+) -> tuple[Path, Path, str]:
+    """Resolve the e2e + unit test binaries for a build config.
+
+    If build_config is None, auto-detect the config whose e2e binary was built most
+    recently (by mtime), so a stale config (e.g. Release built before a fix) is not
+    silently used when a newer config (e.g. Debug) exists. Returns (e2e, unit, config).
+    """
+    tests_dir = build_dir / "tests"
+    if not tests_dir.is_dir():
+        raise SystemExit(f"tests dir not found (build first): {tests_dir}")
+    if build_config is None:
+        candidates: list[tuple[float, str]] = []
+        for config_dir in tests_dir.iterdir():
+            exe = config_dir / E2E_BINARY_NAME
+            if exe.is_file():
+                candidates.append((exe.stat().st_mtime, config_dir.name))
+        if not candidates:
+            raise SystemExit(f"no e2e test binary found under {tests_dir} (build it first)")
+        candidates.sort(key=lambda pair: pair[0])
+        build_config = candidates[-1][1]
+    config_dir = tests_dir / build_config
+    return config_dir / E2E_BINARY_NAME, config_dir / UNIT_BINARY_NAME, build_config
 
 
 @dataclass
@@ -70,22 +159,56 @@ def wait_for_free_port(host: str, port: int, timeout_s: float) -> None:
         time.sleep(5)
 
 
-def run_command(cmd: list[str], env: dict[str, str], timeout_s: float) -> tuple[int, str]:
-    print(f"\n$ {' '.join(cmd)}")
+def run_command(cmd: list[str], env: dict[str, str], timeout_s: float,
+                heartbeat_s: float = 30.0) -> tuple[int, str]:
+    """Run cmd, streaming a heartbeat while it runs and a tail of its output on exit.
+
+    The subprocess output is redirected to a temp file (not a pipe) so a chatty binary
+    cannot fill the pipe buffer and deadlock the run; a periodic heartbeat keeps a
+    wrapping monitor/watcher from seeing a long silent run (model load + inference) as
+    a hang and killing a legitimately-running test.
+    """
+    print(f"\n$ {' '.join(cmd)}", flush=True)
     started = time.monotonic()
-    proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout_s)
+    logf = tempfile.NamedTemporaryFile(mode="w+", suffix=".log", delete=False, encoding="utf-8")
+    log_path = logf.name
+    proc = subprocess.Popen(cmd, env=env, stdout=logf, stderr=subprocess.STDOUT, text=True)
+    deadline = started + timeout_s
+    timed_out = False
+    try:
+        while proc.poll() is None:
+            if time.monotonic() >= deadline:
+                proc.kill()
+                timed_out = True
+                break
+            remaining = deadline - time.monotonic()
+            time.sleep(min(heartbeat_s, max(0.0, remaining)))
+            if proc.poll() is None and not timed_out:
+                print(f"  … still running ({time.monotonic() - started:.0f}s)", flush=True)
+        if timed_out:
+            proc.wait()
+    finally:
+        logf.flush()
+        logf.close()
     elapsed = time.monotonic() - started
-    tail = "\n".join((proc.stdout or "").strip().splitlines()[-40:])
-    err = (proc.stderr or "").strip()
+    with open(log_path, encoding="utf-8", errors="replace") as f:
+        content = f.read()
+    try:
+        os.unlink(log_path)
+    except OSError:
+        pass
+    tail = "\n".join(content.strip().splitlines()[-40:])
     if tail:
-        print(tail)
-    if err:
-        print(f"  [stderr] {err[:2000]}")
-    print(f"  -> exit {proc.returncode} in {elapsed:.1f}s")
+        print(tail, flush=True)
+    print(f"  -> exit {proc.returncode} in {elapsed:.1f}s" + (" (TIMEOUT)" if timed_out else ""),
+          flush=True)
     return proc.returncode, ""
 
 
 def main() -> int:
+    # Line-buffer stdout so a wrapping monitor/watcher sees every line immediately;
+    # block-buffered pipe stdout would otherwise look idle and get killed mid-wait.
+    sys.stdout.reconfigure(line_buffering=True)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifact", default=DEFAULT_ARTIFACT, help="path to the .ninfer artifact")
     parser.add_argument("--host", default="127.0.0.1")
@@ -94,15 +217,51 @@ def main() -> int:
     parser.add_argument("--e2e-timeout", type=float, default=1800, help="per-scenario GPU test timeout (s)")
     parser.add_argument("--unit-timeout", type=float, default=300)
     parser.add_argument("--skip-port-wait", action="store_true", help="assume the port is already free")
+    parser.add_argument(
+        "--build-dir",
+        default=str(DEFAULT_BUILD_DIR),
+        help="CMake build directory (default: <repo>/build-windows)",
+    )
+    parser.add_argument(
+        "--build-config",
+        default=None,
+        help="build config dir name (e.g. Debug/Release); default: the one whose e2e binary is newest",
+    )
+    parser.add_argument(
+        "--log",
+        default=str(DEFAULT_LOG),
+        help="durable log file (default: <repo>/.qwen/prefix_smoke.log); append mode",
+    )
     args = parser.parse_args()
+
+    tee = _Tee(sys.stdout, Path(args.log))
+    sys.stdout = tee
+    print(f"\n=== prefix smoke run log: {args.log} ===", flush=True)
 
     artifact = args.artifact
     if not Path(artifact).is_file():
         raise SystemExit(f"artifact not found: {artifact}")
-    if not E2E_BINARY.is_file():
-        raise SystemExit(f"e2e test binary not found (build it first): {E2E_BINARY}")
-    if not UNIT_BINARY.is_file():
-        raise SystemExit(f"unit test binary not found (build it first): {UNIT_BINARY}")
+
+    e2e_binary, unit_binary, build_config = resolve_test_binaries(
+        Path(args.build_dir), args.build_config
+    )
+    if not e2e_binary.is_file():
+        raise SystemExit(f"e2e test binary not found (build it first): {e2e_binary}")
+    if not unit_binary.is_file():
+        raise SystemExit(f"unit test binary not found (build it first): {unit_binary}")
+
+    e2e_mtime = e2e_binary.stat().st_mtime
+    print(f"Build config : {build_config}")
+    print(f"E2E binary   : {e2e_binary}")
+    print(f"  built      : {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(e2e_mtime))}")
+    newest_src = newest_source_commit_unix_time()
+    if newest_src is not None and e2e_mtime < newest_src:
+        print(
+            "  WARNING: the e2e binary is OLDER than the newest commit touching the watched "
+            "cache sources; it may predate a recent fix (crash fix / issue #251). Rebuild the "
+            f"'{build_config}' config before trusting a result.",
+            file=sys.stderr,
+        )
 
     if not args.skip_port_wait:
         print(f"Waiting for the production server on {args.host}:{args.port} to stop…")
@@ -116,10 +275,10 @@ def main() -> int:
     for issue in ISSUES:
         if issue.kind == "e2e":
             env = dict(base_env, NINFER_PREFIX_REAL_SCENARIO=issue.name)
-            code, _ = run_command([str(E2E_BINARY)], env, args.e2e_timeout)
+            code, _ = run_command([str(e2e_binary)], env, args.e2e_timeout)
         else:
             env = dict(os.environ)
-            code, _ = run_command([str(UNIT_BINARY)], env, args.unit_timeout)
+            code, _ = run_command([str(unit_binary)], env, args.unit_timeout)
         results.append((issue, code == 0, f"exit {code}"))
 
     print("\n=== summary ===")
