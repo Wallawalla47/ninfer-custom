@@ -1,4 +1,4 @@
-"""Exercise the three recent prefix-caching changes against a real .ninfer artifact.
+"""Exercise the recent prefix-caching changes against a real .ninfer artifact.
 
 The GPU must be free first: stop the production server on :8080, then run this script.
 It polls until the port is free and runs the real-Engine prefix scenarios serially,
@@ -10,6 +10,14 @@ Covered changes:
   2. Issue #229 cost-scaled materialization budget -> ninfer_resource_manager_test (unit)
   3. Issue #251 shared-catalog saturation reclaim  -> scenario "shared-saturation-reclaim"
      plus "shared-replacement" as the adjacent explicit-candidate capacity path.
+  4. Stats-publication ordering (no leaked references after a released lane) is asserted by
+     every e2e scenario, including the five realistic agent scenarios below.
+
+The "agent-*" scenarios mirror the production agent traffic shape (E:/NInfer-Deploy-V3/log.json):
+a shared system + tools prefix, a growing multi-turn conversation with tool calls, and thinking
+on and preserved. They drive the 36h caching fixes into contention -- a full shared catalog,
+saturated private continuations, KV-capacity pressure, and concurrent requests -- and assert the
+observable guarantees (shared-prefix reuse, pressure evictions, and zero leaked references).
 
 The test binaries are resolved from <build-dir>/tests/<config>. When --build-config is
 omitted, the config whose e2e binary was built most recently (by mtime) is used, and the
@@ -134,6 +142,16 @@ ISSUES = [
     Issue("preserved-recent-prefixes escape hatch", "e2e", "preserved-recent-prefixes"),
     Issue("issue #251 shared-catalog saturation reclaim", "e2e", "shared-saturation-reclaim"),
     Issue("issue #251 shared reuse at full capacity", "e2e", "shared-replacement"),
+    # Realistic agent scenarios (system + tools shared prefix, growing multi-turn conversation
+    # with tool calls, thinking on and preserved -- the shape in E:\NInfer-Deploy-V3\log.json)
+    # that drive the 36h caching fixes into contention (full shared catalog, saturated private
+    # continuations, KV-capacity pressure, concurrent requests) and assert the observable
+    # guarantees: shared-prefix reuse, pressure evictions, and no leaked references (d9d110e3).
+    Issue("agent: shared system+tools prefix across multi-turn tool calls", "e2e", "agent-multi-turn"),
+    Issue("agent: private-continuation saturation preserves the most recent", "e2e", "agent-private-continuations"),
+    Issue("agent: two concurrent requests settle without leaked references", "e2e", "agent-concurrent"),
+    Issue("agent: long conversations overflow the KV capacity", "e2e", "agent-kv-pressure"),
+    Issue("agent: automatic prefixes reclaim a saturated shared catalog (#251)", "e2e", "agent-shared-catalog"),
     Issue("issue #229 cost-scaled search budget (+ #251 reclaim) [unit]", "unit", "all"),
 ]
 
@@ -156,6 +174,40 @@ def wait_for_free_port(host: str, port: int, timeout_s: float) -> None:
                 f"port {port} was still in use after {timeout_s:.0f}s — is the production server stopped?"
             )
         print(f"  port {port} in use; waiting for the server to stop…")
+        time.sleep(5)
+
+
+def gpu_vram_used_mb() -> int | None:
+    """Return the GPU VRAM usage in MB, or None if nvidia-smi is unavailable."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if out.returncode != 0:
+            return None
+        return int(out.stdout.strip().splitlines()[0])
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
+
+
+def wait_for_vram_release(timeout_s: float, threshold_mb: int = 2048) -> None:
+    """Wait until GPU VRAM drops below threshold_mb (the server released its model).
+
+    The port freeing is not enough: the server process can linger and still hold the 27B
+    model in VRAM, which would make a fresh test load contend and crash (the abort0 the
+    suite saw while running in parallel with :8080). Wait until the model is actually
+    unloaded before running the suite.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        used = gpu_vram_used_mb()
+        if used is not None and used < threshold_mb:
+            return
+        if time.monotonic() >= deadline:
+            print(f"  WARNING: GPU VRAM still at {used} MB after {timeout_s:.0f}s; proceeding anyway.")
+            return
+        print(f"  GPU VRAM at {used} MB; waiting for the server to release the model…", flush=True)
         time.sleep(5)
 
 
@@ -267,6 +319,9 @@ def main() -> int:
         print(f"Waiting for the production server on {args.host}:{args.port} to stop…")
         wait_for_free_port(args.host, args.port, args.port_timeout)
         print("  port is free.")
+        print("Waiting for GPU VRAM to release…", flush=True)
+        wait_for_vram_release(args.port_timeout)
+        print("  GPU VRAM released; running the suite on a clean GPU.", flush=True)
 
     base_env = dict(os.environ)
     base_env["NINFER_TEST_ARTIFACT"] = str(Path(artifact).resolve())
@@ -291,7 +346,7 @@ def main() -> int:
     if failed:
         print(f"\n{failed} issue(s) FAILED.")
         return 1
-    print("\nAll three prefix-caching changes verified against the real artifact.")
+    print(f"\nAll {len(ISSUES)} prefix-caching checks verified against the real artifact.")
     return 0
 
 
