@@ -35,6 +35,12 @@ the "Upstream README" heading.
   [bingchengcc](https://github.com/bingchengcc).
 - **PR #292** — ladder the Q5 linear K-split capacity to the token count, by
   [giveen](https://github.com/giveen).
+- **PR #295** — accept `reasoning.summary` and `include: ["reasoning.encrypted_content"]`
+  in OpenAI Responses API requests, unblocking harnesses such as Codex and Zed Agent, by
+  [Macasacker](https://github.com/Macasacker), rebasing
+  [Sha1rholder](https://github.com/Sha1rholder)'s original PR #148. The PR's new test
+  assertions were adapted locally to compare JSON objects order-independently, because
+  `RequestJson` is an `ordered_json` whose object equality is insertion-order sensitive.
 
 Recurring merges from upstream `master` additionally bring in ongoing kernel and build
 work: NVFP4/Q8/sparse-MoE dispatch tuning, whole-tile W4A4 TMA scale routing, the real
@@ -145,7 +151,9 @@ A big thank you to all the contributors to upstream NInfer —
 [Valeriy Selitskiy (iamwavecut)](https://github.com/iamwavecut),
 [Hector Ramon Jimenez (hecrj)](https://github.com/hecrj),
 [giveen](https://github.com/giveen),
-[bingchengcc](https://github.com/bingchengcc), and everyone else whose pull
+[bingchengcc](https://github.com/bingchengcc),
+[Macasacker](https://github.com/Macasacker),
+[Sha1rholder](https://github.com/Sha1rholder), and everyone else whose pull
 requests, reviews and commits made this fork possible — and a particular thank you to
 **[Neroued](https://github.com/Neroued)** for creating NInfer, maintaining upstream so
 well, and for the work this branch builds on.
