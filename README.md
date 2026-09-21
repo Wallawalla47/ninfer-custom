@@ -41,6 +41,10 @@ the "Upstream README" heading.
   [Sha1rholder](https://github.com/Sha1rholder)'s original PR #148. The PR's new test
   assertions were adapted locally to compare JSON objects order-independently, because
   `RequestJson` is an `ordered_json` whose object equality is insertion-order sensitive.
+- **PR #299** — keep the last value on a duplicate tool-call parameter (JSON object
+  semantics) instead of falling back to text, with the repair counted as
+  `duplicate_parameters_repaired` in the parse diagnostics and a short markup snippet
+  logged when a fallback does occur, by [adubkov](https://github.com/adubkov).
 
 Recurring merges from upstream `master` additionally bring in ongoing kernel and build
 work: NVFP4/Q8/sparse-MoE dispatch tuning, whole-tile W4A4 TMA scale routing, the real
@@ -196,7 +200,8 @@ A big thank you to all the contributors to upstream NInfer —
 [giveen](https://github.com/giveen),
 [bingchengcc](https://github.com/bingchengcc),
 [Macasacker](https://github.com/Macasacker),
-[Sha1rholder](https://github.com/Sha1rholder), and everyone else whose pull
+[Sha1rholder](https://github.com/Sha1rholder),
+[adubkov](https://github.com/adubkov), and everyone else whose pull
 requests, reviews and commits made this fork possible — and a particular thank you to
 **[Neroued](https://github.com/Neroued)** for creating NInfer, maintaining upstream so
 well, and for the work this branch builds on.
