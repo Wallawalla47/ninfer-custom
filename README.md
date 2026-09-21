@@ -6,7 +6,7 @@
 > accurate. This is simply hobby development.
 
 This repository is a personal fork of [Neroued/ninfer](https://github.com/Neroued/ninfer),
-maintained on the branch `port/local-features-2026-09-15`. It tracks upstream while adding
+maintained on the branch `master`. It tracks upstream while adding
 local features on top. This section summarises, in high terms, everything merged in from
 other sources and everything built locally; the upstream README follows, unmodified, below
 the "Upstream README" heading.
