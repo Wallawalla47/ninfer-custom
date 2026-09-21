@@ -147,6 +147,21 @@ fixtures, and the per-component CMake reorganisation.
 - **Quasar NVFP4 conversion fixes** — dflash2 head-use declarations and an indexed
   proposal head (`--proposal`) so rebuilt artifacts support `--lm-head-draft`.
 
+**Numerics**
+
+- **Accurate `silu` in the NVFP4 fused SwiGLU TMA epilogue** — reverts the approximate
+  activation upstream took in PR #250 (commit `05507ab0`), restoring `silu` at the four
+  call sites in `nvfp4_linear_swiglu_w4a4_tma.cuh` and deleting the now-unused
+  `silu_approx` helper. Follows
+  [Neroued/ninfer#285](https://github.com/Neroued/ninfer/issues/285), where
+  [bingchengcc](https://github.com/bingchengcc) measured the trade at model level rather
+  than op level: over 47,917 scored tokens the approximate form costs +0.009323 absolute
+  (+0.61 % relative) corpus perplexity (1.540180 against 1.530857), while the prefill wall
+  clock it buys back is only about 1.4 % (TTFT 1.832 s against 1.858 s on a 16,817-token
+  prompt) — far short of the ~10.8 % the Op benchmark reported — with decode unchanged.
+  Quality was judged the better side of that trade; every other SwiGLU epilogue in the
+  tree already computes the accurate form.
+
 ## Model artifacts
 
 **[Qwen3.8-27B-Quasar-NinferV3](https://huggingface.co/Wallawalla47/Qwen3.8-27B-Quasar-NinferV3)**
