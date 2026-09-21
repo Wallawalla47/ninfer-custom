@@ -187,6 +187,30 @@ ninfer-serve.exe "E:\NInfer-Deploy-V3-output\qwen3_8_27b_nvfp4-quasar-proposal.n
 
 This is the current `LaunchQwen3.8-27B-quasar-dflash2-ngram.bat` launch configuration.
 
+**[Qwen3.8-27B-NVIDIA-NVFP4-NInferV3](https://huggingface.co/Wallawalla47/Qwen3.8-27B-NVIDIA-NVFP4-NInferV3)**
+on Hugging Face — a single-file `.ninfer` engine artifact of
+[nvidia/Qwen3.8-27B-NVFP4](https://huggingface.co/nvidia/Qwen3.8-27B-NVFP4)
+(the Model Optimizer mixed NVFP4/FP8 checkpoint), built with the
+`qwen3_8_27b_nvfp4_nvidia` recipe in `tools/convert/official_recipes.py` for an
+RTX 5090 (sm_120a). The NVFP4 MLP and FP8 attention/GDN projections are
+imported bit-exact (no requantisation round-trip); only the output head is
+re-quantised (NVFP4 → row-scale FP8, because the engine registers the
+vocabulary projection only for Q8/Q6/FP8, and FP8 was benchmarked faster than
+Q8 at the decode/verify token range). The DFlash2 draft model is grafted
+verbatim, and an indexed 131,072-row proposal head gathered from the NVIDIA
+output head enables `--lm-head-draft`. The HF page carries the full creation
+outline and the conversion report.
+
+Configuration used for running it (single 32 GB GPU — stop any other resident model
+first):
+
+```bat
+ninfer-serve.exe "E:\NInfer-Deploy-V3\qwen3_8_27b_nvfp4-nvidia.ninfer" --host 127.0.0.1 --port 8080 --max-context 240000 --max-concurrency 2 --spec dflash2 --draft-tokens 7 --lm-head-draft --ngram-draft-tokens 15 --ngram-min-match 8 --kv-dtype int8 --preserve-thinking --host-kv-mib 24000 --pending-timeout-ms 900000 --prefill-chunk 2048 --kv-capacity auto --kv-headroom-mib 0 --log-colours on --host-state-slots 64 --max-private-continuations 32 --max-long-anchors-per-continuation 8 --max-shared-prefixes 32 --ngram-archive-mib 2048 --ngram-session-mib 256 --ngram-native-sessions --cuda-graph-allowance-mib 500 --request-log-jsonl log.json --default-thinking-budget 32000 --thinking-budget-message "Considering the limited time available to the user, I must stop thinking now. Time to act:" --preserved-recent-prefixes 3
+```
+
+This is the current `LaunchQwen3.8-27B-nvidia-dflash2-ngram.bat` launch
+configuration.
+
 ## Thanks
 
 A big thank you to all the contributors to upstream NInfer —
