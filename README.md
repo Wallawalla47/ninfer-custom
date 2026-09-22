@@ -59,6 +59,12 @@ the "Upstream README" heading.
   [pkochubey](https://github.com/pkochubey). The type is not enforced: NInfer still has no
   constrained decoding, and `docs/serving.md` states that rather than claiming the schema is
   honoured.
+- **PR #300 (truncation stop reasons)** — report a truncated answer as truncated rather than as a
+  completed tool call: `length` on chat completions and `max_tokens` /
+  `model_context_window_exceeded` on Messages now win over `tool_calls` / `tool_use` when the
+  output limit or context capacity cut the call short, by
+  [pkochubey](https://github.com/pkochubey). A client that trusts the terminal reason would
+  otherwise act on a call whose arguments may be incomplete. The partial call is still streamed.
 
 Recurring merges from upstream `master` additionally bring in ongoing kernel and build
 work: NVFP4/Q8/sparse-MoE dispatch tuning, whole-tile W4A4 TMA scale routing, the real
