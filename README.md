@@ -236,6 +236,21 @@ fixtures, and the per-component CMake reorganisation.
   Recoverable `logic_error`s take the same path, and the fatal crash handler now logs a
   `WORKER CRASH` diagnostic. The commit's qwen3_6 prefill stream-sync hunk was not
   taken (that target does not exist in this fork).
+- **Concurrent staged-prefill lanes** — original work by
+  [Gideon Zenz (gzenz)](https://github.com/gzenz) in the
+  [gzenz/ninfer](https://github.com/gzenz/ninfer) fork (September 2026), commit
+  `576e72ea` ("Support concurrent staged-prefill lanes and apply YARN scaling to DFlash
+  target RoPE positions"): staged prefill ownership changed from a single optional lane
+  to a per-lane bitmask in the Scheduler, so several requests may prefill
+  simultaneously. A staged prefill holds no resource transaction (materialization
+  already committed the lane's full reservation), so admission is no longer gated
+  behind a prefill owner — waiting requests can be admitted to free lanes while others
+  are prefilling, and every prefill unit boundary re-arms the admission check, letting
+  one request's prefill overlap the prefill and decode of the rest. Each worker
+  boundary still advances exactly one staged lane (lowest index first, skipping
+  capture-offering lanes). The commit's bundled qwen3_6 YARN RoPE-position scaling was
+  not taken (that target does not exist in this fork; this fork applies YaRN through
+  the RoPE op instead).
 
 ## Local changes
 
