@@ -343,6 +343,7 @@ int main() {
                                            "model.ninfer",
                                            "--no-prefix-reuse",
                                            "--vision",
+                                           "--usage-chunk-choice",
                                            "--max-concurrency",
                                            "4",
                                            "--max-pending-requests",
@@ -368,6 +369,8 @@ int main() {
                           configured.context_cache.host_kv_capacity_bytes == 0,
                       "root-only server mode retained default Host capacities");
     failures += check(configured.enable_vision, "--vision did not enable Vision");
+    failures += check(configured.usage_chunk_choice,
+                      "--usage-chunk-choice did not reach serving options");
     failures += check(configured.preserve_thinking == true,
                       "--preserve-thinking did not reach serving options");
     failures +=
@@ -541,6 +544,9 @@ int main() {
                       "serve help omits --thinking-budget-message");
     failures += check(serve_usage_text("ninfer-serve").find("--vision") != std::string::npos,
                       "serve help omits --vision");
+    failures += check(serve_usage_text("ninfer-serve").find("--usage-chunk-choice") !=
+                          std::string::npos,
+                      "serve help omits --usage-chunk-choice");
     failures +=
         check(serve_usage_text("ninfer-serve").find("--log-stats-interval-ms") != std::string::npos,
               "serve help omits --log-stats-interval-ms");
