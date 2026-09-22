@@ -11,6 +11,88 @@ local features on top. This section summarises, in high terms, everything merged
 other sources and everything built locally; the upstream README follows, unmodified, below
 the "Upstream README" heading.
 
+## Inference performance: this fork vs upstream (A/B benchmark)
+
+Both arms serve the same official NInfer Qwen3.8-27B NVFP4 artifact
+(`qwen3_8_27b_nvfp4-official.ninfer`) on a NVIDIA GeForce RTX 5090, run at the same
+max-context (180000 — the largest context at which the upstream arm starts on this card;
+see below) and replay the same synthesized agentic workload: 14 requests shaped from
+the production request log (multi-turn tool-agent sessions, ~82,000-token shared prefix,
+median prompt ≈ 121K tokens, two concurrent-request pairs including a shared-prefix
+cache-contention pair, max-concurrency 2).
+
+| Metric | Upstream + Windows port | This NInfer-custom fork | Δ |
+|---|---|---|---|
+| Avg TTFT (s, lower better) | 28.1 | 14.6 | -48.1% |
+| TTFT median (s, lower better) | 25.9 | 11.3 | -56.6% |
+| Prefix-cache hit rate (hit/prompt tokens) | 19.8% | 66.3% | +46.5 pp |
+| Total cache-hit tokens (of 1,649,215 prompt) | 326,780 | 1,093,256 | +234.6% |
+| Prefill tok/s, cold (root) requests, median | 4,159 | 4,220 | +1.5% |
+| Output tok/s | 173 | 181 | +4.6% |
+
+- Avg/median TTFT over all 14 completed requests per arm.
+- Cold (root) prefill = requests that did a full uncached prefill (n: upstream 11, fork 2).
+- Output tok/s = total completion tokens / total decode wall time (completion tokens:
+  upstream 12,639, fork 6,543; thinking on for both arms; per-request decode rates are
+  comparable — see the per-request tables in the full report).
+- Cache hits by reuse path (requests / hit tokens):
+
+  | Path | Upstream | This NInfer-custom fork |
+  |---|---|---|
+  | private_long_anchor | 0 / 0 | 9 / 766,476 |
+  | private_response_replay | 3 / 326,780 | 3 / 326,780 |
+  | root | 11 / 0 | 2 / 0 |
+
+**Workload note.** This was tested on what is designed to be a fairly representative
+agentic workload (the synthetic sessions described above). If the workload includes
+more copying work, the ngram-based drafting implementation
+(`--ngram-draft-tokens` / `--ngram-min-match`) would boost output tok/s further.
+
+**Configuration and launch parameters.** Model: the official NInfer Qwen3.8-27B NVFP4
+artifact `qwen3_8_27b_nvfp4-official.ninfer`; GPU: NVIDIA GeForce RTX 5090; max-context
+180000 for both arms; max-concurrency 2; `--kv-dtype int8`.
+
+Launch parameters, this fork (all flags):
+
+```text
+--host 127.0.0.1 --port 8080 --max-context 180000 --max-concurrency 2 --spec dflash2
+--draft-tokens 7 --lm-head-draft --ngram-draft-tokens 15 --ngram-min-match 12
+--kv-dtype int8 --preserve-thinking --host-kv-mib 24000 --pending-timeout-ms 900000
+--prefill-chunk 2048 --kv-capacity auto --kv-headroom-mib 0 --log-colours on
+--host-state-slots 64 --max-private-continuations 32
+--max-long-anchors-per-continuation 8 --max-shared-prefixes 32
+--ngram-archive-mib 2048 --ngram-session-mib 256 --ngram-native-sessions
+--cuda-graph-allowance-mib 500 --default-thinking-budget 16384
+--thinking-budget-message "Considering the limited time available to the user, I must stop
+thinking now. Time to act:" --preserved-recent-prefixes 3
+```
+
+Launch parameters, upstream + Windows port (same list minus the fork-only flags it does
+not support, which are dropped: `--ngram-draft-tokens`, `--ngram-min-match`,
+`--kv-headroom-mib`, `--log-colours`, `--ngram-archive-mib`, `--ngram-session-mib`,
+`--ngram-native-sessions`, `--cuda-graph-allowance-mib`, `--thinking-budget-message`,
+`--preserved-recent-prefixes`):
+
+```text
+--host 127.0.0.1 --port 8080 --max-context 180000 --max-concurrency 2 --spec dflash2
+--draft-tokens 7 --lm-head-draft --kv-dtype int8 --preserve-thinking
+--host-kv-mib 24000 --pending-timeout-ms 900000 --prefill-chunk 2048 --kv-capacity auto
+--host-state-slots 64 --max-private-continuations 32
+--max-long-anchors-per-continuation 8 --max-shared-prefixes 32
+--default-thinking-budget 16384
+```
+
+The upstream serve bakes an automatic 1 GiB KV headroom into `--kv-capacity auto` that
+has no flag to lower (the fork's `--kv-headroom-mib 0`), so it cannot start at the
+production max-context 220000 on this 32 GiB card; both arms therefore run at the same
+calibrated 180000 so the arms stay comparable. Thinking is on for both arms
+(`--default-thinking-budget 16384` + `--preserve-thinking`; both upstream-supported).
+
+Workload: 14 requests, seed 42; groups replayed in order, requests within a group sent
+concurrently. The full A/B rig — workload generator, runner, watchdog and control build
+driver — lives in [`bench/ab/`](bench/ab/README.md) so the test can be replicated with
+your own builds and flags.
+
 ## Merged from upstream and other sources
 
 **Upstream pull requests** (`Neroued/ninfer`):

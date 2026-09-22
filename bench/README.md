@@ -10,6 +10,10 @@ The frozen request corpus for the separate black-box Serve TTFT tool is document
 [`fixtures/ttft/`](fixtures/ttft/README.md). That client does not call the benchmark executables or
 Engine directly.
 
+The serve-level A/B benchmark (upstream + Windows port vs this fork, black-box OpenAI
+API agentic workload; the headline numbers in the [fork README](../README.md)) is a
+standalone Python rig under [`ab/`](ab/README.md).
+
 ## Build
 
 `CMakeLists.txt` includes explicit registrations from `ops/`, `inference/`, `context_cost/`
