@@ -53,6 +53,12 @@ the "Upstream README" heading.
   [#276](https://github.com/Neroued/ninfer/issues/276), by
   [pkochubey](https://github.com/pkochubey). The PR's conflicting-duplicate rejection was adapted
   to the last-value-wins rule from PR #299 above.
+- **PR #300 (`response_format`)** — accept `{"type":"json_object"}` and `{"type":"json_schema"}` on
+  chat completions instead of refusing everything but `{"type":"text"}`, so harnesses that always
+  send a response format (Hermes-style clients among them) are not rejected, by
+  [pkochubey](https://github.com/pkochubey). The type is not enforced: NInfer still has no
+  constrained decoding, and `docs/serving.md` states that rather than claiming the schema is
+  honoured.
 
 Recurring merges from upstream `master` additionally bring in ongoing kernel and build
 work: NVFP4/Q8/sparse-MoE dispatch tuning, whole-tile W4A4 TMA scale routing, the real
