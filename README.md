@@ -197,6 +197,19 @@ fixtures, and the per-component CMake reorganisation.
   output budget is kept with its partial value, a missing closing bracket after the function
   name is recovered by an identifier-run scan, and undeclared tool names stay structured. The
   strict parser — the default — is unchanged.
+- **Materialization seal-window atomicity** — original fix by
+  [Gideon Zenz (gzenz)](https://github.com/gzenz) in the
+  [gzenz/ninfer](https://github.com/gzenz/ninfer) fork (September 2026), commit
+  `c53e025c` ("fix(planner): make materialization seal atomic via a seal-window claim"):
+  the materialization assess-to-seal window raced on a victim's continuation slot
+  generation — a concurrent demote bumped it, so the seal's revalidation saw stale
+  policy state and the planner's throw propagated to the Engine worker's last-resort
+  handler, failing the whole instance. An atomic claim (compare-and-swap with bounded
+  backoff) now serializes the window, and a lost claim or failed seal falls back to the
+  root-maximal eviction target so the request re-prefills instead of failing admission.
+  The commit's unrelated search-budget tuning and debug instrumentation were not taken;
+  the tolerant-parser tweak it bundled is already covered by the multi-marker recovery
+  above.
 
 ## Local changes
 

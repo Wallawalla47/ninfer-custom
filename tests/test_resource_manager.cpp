@@ -614,6 +614,8 @@ public:
     [[nodiscard]] std::optional<FakeResourcePlan> seal(FakeAssessedPressureTarget&& assessed);
     [[nodiscard]] std::optional<FakeResourcePlan>
     seal_capture(FakeAssessedPressureTarget&& assessed);
+    [[nodiscard]] bool try_claim_seal_window() noexcept;
+    void release_seal_window() noexcept;
 
 private:
     struct Owner {
@@ -1920,6 +1922,10 @@ std::optional<FakeResourcePlan>
 FakePressurePlanningSession::seal(FakeAssessedPressureTarget&& assessed) {
     return seal_capture(std::move(assessed));
 }
+
+bool FakePressurePlanningSession::try_claim_seal_window() noexcept { return true; }
+
+void FakePressurePlanningSession::release_seal_window() noexcept {}
 
 FakePressurePlanningSession
 FakeProgram::begin_pressure_planning(std::span<const FakeAdmissionCandidate* const> candidates,
