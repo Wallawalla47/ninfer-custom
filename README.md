@@ -178,6 +178,25 @@ fixtures, and the per-component CMake reorganisation.
   previous-generation tree's PR #73 ("content-addressed KV host cache + vision overlay
   residency"): the overlay port, 35B support, and the residency flags. Re-implemented for
   this V3 engine as `--vision-residency overlay` (local re-implementation, below).
+- **Tolerant tool-call recovery (`--tolerant-tool-calls`)** — original design and
+  implementation by [David Oelfke (gzenz)](https://github.com/gzenz) in the
+  [gzenz/ninfer](https://github.com/gzenz/ninfer) fork (September 2026), commits
+  `b2267e06` ("add --tolerant-tool-calls to recover complete Qwen calls with malformed
+  wrapper or suffix output"), `0ce6e3f6` ("recover a single truncated final call in tolerant
+  mode when closing tags are cut off at region end"), `0f3c9f55` ("recover function name
+  in tolerant mode when the closing '>' is omitted before a parameter tag"), `38709834`
+  ("keep a value cut by the output budget, and keep a truncated final call only when at
+  least one parameter is complete — otherwise the region stays text, with the operational
+  record guarded to match"), and `44f2c9c3` ("keep complete calls whose name is not in the
+  declared tools"). gzenz's version
+  sits on a divergent canonical parser, so the recovery logic was **ported** onto this fork's
+  multi-marker parser (PR #300's marker recognition and PR #299's last-value-wins duplicate
+  handling are preserved): in tolerant mode, a complete call followed by a trailing suffix or
+  a malformed second call keeps the good call with the tail discarded (`truncated_tail`
+  diagnostic, logged at Info severity), a single final call cut at the region end by the
+  output budget is kept with its partial value, a missing closing bracket after the function
+  name is recovered by an identifier-run scan, and undeclared tool names stay structured. The
+  strict parser — the default — is unchanged.
 
 ## Local changes
 
