@@ -222,6 +222,20 @@ fixtures, and the per-component CMake reorganisation.
   `div_up(window, 3968)` (62 pages plus a 2-page rounding margin) and capped at 256
   (the split reducer), applied consistently in the host-side `causal_small_t_split_upper_bound`
   and the device-side split selection.
+- **Engine OOM recovery** — original work by
+  [Gideon Zenz (gzenz)](https://github.com/gzenz) in the
+  [gzenz/ninfer](https://github.com/gzenz/ninfer) fork (September 2026), commit
+  `3f3272d6` ("Improve engine OOM recovery and qwen3_6 prefill stream safety"): a
+  `std::bad_alloc` (typically device-KV reservation failure) no longer crashes the
+  Engine worker. The materialization reserve in admission is guarded and fails only the
+  affected request with a retryable `Overloaded` error; the worker loop catches OOM,
+  errors the active/materializing requests through a per-step-guarded
+  `force_complete_error`, resets the scheduler and program state while leaving pending
+  requests in the FIFO, and continues with a bounded admission backoff — after
+  `kOomMaxRecoveries` (8) consecutive failed recoveries it fails all pending instead.
+  Recoverable `logic_error`s take the same path, and the fatal crash handler now logs a
+  `WORKER CRASH` diagnostic. The commit's qwen3_6 prefill stream-sync hunk was not
+  taken (that target does not exist in this fork).
 
 ## Local changes
 
