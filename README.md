@@ -210,6 +210,18 @@ fixtures, and the per-component CMake reorganisation.
   The commit's unrelated search-budget tuning and debug instrumentation were not taken;
   the tolerant-parser tweak it bundled is already covered by the multi-marker recovery
   above.
+- **Split-KV page-limit floor (small-t split safety)** — original fix by
+  [Gideon Zenz (gzenz)](https://github.com/gzenz) in the
+  [gzenz/ninfer](https://github.com/gzenz/ninfer) fork (September 2026), commit
+  `7a876cf7` ("fix(attn): floor split-KV split count by page limit to prevent shared-memory
+  OOB at large context windows"): for the `SmallTSplitScale == 1` geometry, each split
+  stages at most 64 physical-page IDs into `__shared__ physical_pages_s[64]`, so the
+  number of splits must keep keys-per-split within one page table; the old code clamped
+  splits to `SmallTMaximumSplits`, which under-provisioned at (YaRN-extended) large
+  windows and overflowed shared memory. The split count is now floored to
+  `div_up(window, 3968)` (62 pages plus a 2-page rounding margin) and capped at 256
+  (the split reducer), applied consistently in the host-side `causal_small_t_split_upper_bound`
+  and the device-side split selection.
 
 ## Local changes
 
