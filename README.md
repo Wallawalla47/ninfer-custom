@@ -65,6 +65,13 @@ the "Upstream README" heading.
   output limit or context capacity cut the call short, by
   [pkochubey](https://github.com/pkochubey). A client that trusts the terminal reason would
   otherwise act on a call whose arguments may be incomplete. The partial call is still streamed.
+- **PR #300 (assistant prefill)** — accept a trailing assistant message as an assistant-prefill
+  continuation on chat completions as well as Messages, and allow that final turn to carry
+  reasoning content or tool calls, by [pkochubey](https://github.com/pkochubey). This lets an
+  agent client hand back an output-limited partial assistant turn and have the Engine continue it
+  in place. Thinking-enabled prefill stays refused, unlike the PR: the template places the
+  continued content inside an ambiguous reasoning opener, which `test_assistant_continuation`
+  pins, so only the PR's reasoning/tool-call relaxation is taken here.
 
 Recurring merges from upstream `master` additionally bring in ongoing kernel and build
 work: NVFP4/Q8/sparse-MoE dispatch tuning, whole-tile W4A4 TMA scale routing, the real
