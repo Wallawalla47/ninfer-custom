@@ -45,6 +45,14 @@ the "Upstream README" heading.
   semantics) instead of falling back to text, with the repair counted as
   `duplicate_parameters_repaired` in the parse diagnostics and a short markup snippet
   logged when a fallback does occur, by [adubkov](https://github.com/adubkov).
+- **PR #300 (tool-call parsing)** — recognise the XML tool-call forms emitted by Claude Code and
+  other agent harnesses: `<function name="…">` attribute names, `<invoke>`, `<function_calls>`
+  containers, and the `<param>`/`</parameter>` short aliases, with attribute-token-boundary name
+  lookup, matching opening/closing tag pairs, and a streaming decoder that sees every variant
+  rather than only `<tool_call>`. Resolves upstream issue
+  [#276](https://github.com/Neroued/ninfer/issues/276), by
+  [pkochubey](https://github.com/pkochubey). The PR's conflicting-duplicate rejection was adapted
+  to the last-value-wins rule from PR #299 above.
 
 Recurring merges from upstream `master` additionally bring in ongoing kernel and build
 work: NVFP4/Q8/sparse-MoE dispatch tuning, whole-tile W4A4 TMA scale routing, the real
