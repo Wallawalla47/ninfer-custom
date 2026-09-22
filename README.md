@@ -72,6 +72,10 @@ the "Upstream README" heading.
   in place. Thinking-enabled prefill stays refused, unlike the PR: the template places the
   continued content inside an ambiguous reasoning opener, which `test_assistant_continuation`
   pins, so only the PR's reasoning/tool-call relaxation is taken here.
+- **PR #300 (unreachable checkpoints)** — exclude a checkpoint the incoming request cannot reach
+  from the portfolio recovery-loss accounting, so the planner stops crediting an owner for a
+  prefix hit that request could never take, by [pkochubey](https://github.com/pkochubey).
+  Resolves upstream issue [#178](https://github.com/Neroued/ninfer/issues/178).
 
 Recurring merges from upstream `master` additionally bring in ongoing kernel and build
 work: NVFP4/Q8/sparse-MoE dispatch tuning, whole-tile W4A4 TMA scale routing, the real
