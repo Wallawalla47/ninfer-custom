@@ -1028,8 +1028,12 @@ graph profiles and concurrency unless `--cuda-graph-allowance-mib` supplies an e
 too-small value risks CUDA out-of-memory at graph capture and a too-large one shrinks the KV pool.
 Capacity resolves once at startup.
 
-Admission reserves the full prompt-plus-effective-output page entitlement through request
-completion. A request remains queued until a legal resource plan can satisfy that entitlement.
+Admission reserves a bounded Device KV window over the request's remaining output and extends it at
+each decode-round boundary; the window is never the whole `max_tokens` budget, so a client that asks
+for far more output than it generates does not hold the prefix cache out of the pool. A request
+remains queued until a legal resource plan can satisfy its prompt plus that window. If the pool can
+no longer extend the window, the request completes at the frontier its window covers and reports
+`finish_reason=length`.
 
 Each reusable checkpoint contains KV and complete continuation state. At admission, capture, and
 finish boundaries, resource pressure may keep it on Device, move its StateImage and/or KV replicas
