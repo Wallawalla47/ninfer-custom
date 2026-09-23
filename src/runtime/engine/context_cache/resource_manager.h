@@ -684,7 +684,7 @@ public:
                 });
                 owner_policies.push_back(typename CapturePlanner::OwnerPolicy{
                     .owner                    = owner,
-                    .last_hit_epoch           = newest_hit_epoch(entry),
+                    .last_hit_epoch           = owner_recency_epoch(entry),
                     .private_retention_weight = private_retention_weight(entry.retention),
                 });
                 if (entry.summary.endpoint) {
@@ -979,6 +979,7 @@ public:
         publication.session   = active.session;
         publication.retention = RetentionClass::Disposable;
         migrate_observations(publication, result.summary, publication.retention);
+        touch_catalog_entry(publication);
         advance_revision(publication.revision);
         if (publication.session && active.update_session_index) {
             if (!publish_session(*publication.session, active.publication_slot, publication.id,
@@ -1057,6 +1058,7 @@ public:
         publication.session   = active.session;
         publication.retention = active.retention;
         migrate_observations(publication, result.summary, active.retention);
+        touch_catalog_entry(publication);
         advance_revision(publication.revision);
         if (publication.session && active.update_session_index) {
             if (!publish_session(*publication.session, active.publication_slot, publication.id,
@@ -1243,6 +1245,11 @@ private:
         std::optional<CacheSessionKey> session;
         std::vector<CheckpointObservation> observations;
         RetentionClass retention = RetentionClass::RecentPrivate;
+        // Retention epoch at which this owner was last published. Checkpoint observations only
+        // advance on a hit, and a publication starts them at zero (the normal ConsumeToActive
+        // continuation even clears the consumed source's history), so without this stamp every
+        // conversation that is being continued normally would rank as the oldest owner.
+        std::uint64_t last_touch_epoch = 0;
     };
 
     struct SharedCatalogEntry {
@@ -1642,7 +1649,8 @@ private:
         entry.handle.reset();
         entry.session.reset();
         entry.observations.clear();
-        entry.retention = RetentionClass::RecentPrivate;
+        entry.retention        = RetentionClass::RecentPrivate;
+        entry.last_touch_epoch = 0;
         advance_revision(entry.revision);
     }
 
@@ -1760,6 +1768,16 @@ private:
             epoch = std::max(epoch, observation.observation.last_hit_epoch);
         }
         return epoch;
+    }
+
+    // Owner recency for the retention tier: the later of its newest checkpoint hit and its last
+    // publication. Both are drawn from `retention_epoch_`, so they order against each other.
+    [[nodiscard]] std::uint64_t owner_recency_epoch(const CatalogEntry& entry) const noexcept {
+        return std::max(newest_hit_epoch(entry), entry.last_touch_epoch);
+    }
+
+    void touch_catalog_entry(CatalogEntry& entry) noexcept {
+        entry.last_touch_epoch = ++retention_epoch_;
     }
 
     template <class SplitCostFn>
@@ -2065,7 +2083,7 @@ private:
                     .owner                    = owner,
                     .retention_class          = entry.retention,
                     .selected_hit_count       = selected_hits,
-                    .last_hit_epoch           = newest_hit_epoch(entry),
+                    .last_hit_epoch           = owner_recency_epoch(entry),
                     .private_retention_weight = private_retention_weight(entry.retention),
                 });
             }
