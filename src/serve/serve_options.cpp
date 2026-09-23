@@ -118,6 +118,11 @@ std::string serve_usage_text(const char* argv0) {
            "                             (default = --max-concurrency)\n"
            "  --host-state-slots N       host checkpoint slots (default 8)\n"
            "  --host-kv-mib N            host KV cache in MiB (default 8192)\n"
+           "  --host-cache-mib N         single host RAM ceiling for the whole prefix cache;\n"
+           "                             the engine sizes the Host state pool from the\n"
+           "                             configured checkpoint inventory (state capped at half\n"
+           "                             the budget) and gives Host KV the remainder; cannot be\n"
+           "                             combined with --host-state-slots or --host-kv-mib\n"
            "  --max-private-continuations N          bounded private catalogs\n"
            "                                         (default 2x concurrency)\n"
            "  --max-long-anchors-per-continuation N  long anchors per continuation; the engine\n"
@@ -234,6 +239,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     bool default_max_tokens_explicit = false;
     bool kv_capacity_explicit        = false;
     bool context_capacity_explicit   = false;
+    bool host_state_slots_explicit   = false;
+    bool host_kv_mib_explicit        = false;
+    bool host_cache_budget_explicit  = false;
     std::optional<std::size_t> kv_headroom_mib;
     if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
         options.help_requested = true;
@@ -344,6 +352,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.context_cache.host_state_slots = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--host-state-slots"), "host-state-slots"));
             context_capacity_explicit = true;
+            host_state_slots_explicit = true;
         } else if (arg == "--host-kv-mib") {
             const std::uint64_t mib = parse_u64(require_value("--host-kv-mib"), "host-kv-mib");
             if (mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
@@ -351,6 +360,15 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             }
             options.context_cache.host_kv_capacity_bytes = static_cast<std::size_t>(mib << 20);
             context_capacity_explicit                    = true;
+            host_kv_mib_explicit                         = true;
+        } else if (arg == "--host-cache-mib") {
+            const std::uint64_t mib = parse_u64(require_value("--host-cache-mib"), "host-cache-mib");
+            if (mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--host-cache-mib is out of range");
+            }
+            options.context_cache.host_cache_budget_bytes = static_cast<std::size_t>(mib << 20);
+            context_capacity_explicit                     = true;
+            host_cache_budget_explicit                    = true;
         } else if (arg == "--max-private-continuations") {
             options.context_cache.max_private_continuations =
                 static_cast<std::uint32_t>(parse_nonnegative_int(
@@ -516,6 +534,16 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         options.context_cache.enabled                = false;
         options.context_cache.host_state_slots       = 0;
         options.context_cache.host_kv_capacity_bytes = 0;
+    }
+    if (host_cache_budget_explicit) {
+        // The budget is the one host RAM ceiling; the two component flags would silently
+        // fight it, and their independent-allocation semantics are exactly what the budget
+        // exists to replace.
+        if (host_state_slots_explicit || host_kv_mib_explicit) {
+            throw std::invalid_argument(
+                "--host-cache-mib cannot be combined with --host-state-slots or --host-kv-mib: "
+                "the budget derives both Host state slots and Host KV bytes");
+        }
     }
     if (options.port <= 0 || options.port > 65535) {
         throw std::invalid_argument("--port must be in [1,65535]");
