@@ -358,9 +358,12 @@ derivation and the invariants live in
   with no eviction path for automatic-evidence traffic, once every
   `--max-shared-prefixes` slot was resident, later automatic candidates were dropped and
   their shared-prefix reuse froze until an engine restart. Implements the solution
-  suggested by albertov: reclaim the least-recently-used eligible automatic entry when a
-  candidate finds no vacant slot, and count reclaimable slots as publication slack so the
-  materialization selection stops discarding automatic candidates at saturation.
+  suggested by albertov: reclaim the least-recently-used eligible automatic entry (oldest latest
+  hit or publication) when a candidate finds no vacant slot, and count reclaimable slots as
+  publication slack so the materialization selection stops discarding automatic candidates at
+  saturation. The entry is offered to capture planning as a reclaimable slot and released only
+  when the scenario publishing into it is the one selected, so a capture that cannot plan never
+  costs a resident prefix.
 - **Lease and resolved-capacity observability** — the `--request-log-jsonl` occupancy record reports
   the unmaterialised part of the Device KV lease separately from `allocated + reserved` pages, so a
   leased-but-unwritten pool is visible as a lease rather than indistinguishable from real KV, and
