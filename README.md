@@ -341,9 +341,11 @@ derivation and the invariants live in
   alongside a budget.
 - **Salvaged prefills and automatic anchoring** — prefilled context is salvaged when a request is
   aborted, so a retry resumes from the salvaged frontier instead of from root; the engine anchors
-  the last N message boundaries of a conversation automatically
-  (`--max-long-anchors-per-continuation`); and a lane publishes with its staged-prefill bookkeeping
-  cleared.
+  up to N message boundaries of a conversation automatically
+  (`--max-long-anchors-per-continuation`) on a grid that widens geometrically back from the
+  prompt end (`--long-anchor-spacing`, default 1024 tokens), and a full anchor set gives up the
+  anchor whose loss costs the least coverage rather than the deepest one; and a lane publishes with
+  its staged-prefill bookkeeping cleared.
 - **Cost-scaled materialization search budget** — addresses the crux of
   [Neroued/ninfer#229](https://github.com/Neroued/ninfer/issues/229): the flat 5 ms
   under-pressure materialization-search budget is not sufficient — it only manages to

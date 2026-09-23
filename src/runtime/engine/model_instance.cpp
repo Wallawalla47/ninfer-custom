@@ -177,7 +177,9 @@ ModelInstance::ModelInstance(std::unique_ptr<models::qwen3_5::Model> source,
            .ngram_sources_enabled    = options.speculative.ngram_draft_tokens != 0,
            .ngram_archive_enabled    = options.speculative.ngram_archive_bytes != 0,
            .max_long_anchors_per_continuation =
-               options.context_cache.max_long_anchors_per_continuation.value_or(0U)})),
+               options.context_cache.max_long_anchors_per_continuation.value_or(0U),
+           .long_anchor_min_spacing_tokens =
+               options.context_cache.long_anchor_min_spacing_tokens})),
       capacity(options.max_context) {}
 
 ModelInstance::~ModelInstance() = default;
