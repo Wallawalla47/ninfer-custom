@@ -171,6 +171,29 @@ int main() {
                                 "the anchor payoff ceiling lowered a configured count");
     }
 
+    // The production nvidia deployment shape: 52,000 MiB budget with the real int8 page-group
+    // (2,162,688 B) and DFlash2 StateImage (195,897,344 B) unit costs, at --max-concurrency 2
+    // (4 private continuations, 7 shared prefixes) and 240,000-token capacity. Hand oracle: the
+    // half budget is 27,262,976,000 B; the mandatory inventory at 4 anchors is 31 images =
+    // 6,072,817,664 B, leaving 108 images of headroom = 27 extra anchors, so A = 31. The payoff
+    // ceiling is pages(240000) / pages(5760 buyback tokens) - 2 = 3750 / 90 - 2 = 39, so the
+    // budget binds. The pool holds (2 + 31) * 4 + 7 = 139 images = 27,229,730,816 B of state,
+    // and Host KV gets 52000 * 2^20 - that = 27,296,221,184 B.
+    {
+        ninfer::ContextCacheOptions cache;
+        cache.host_cache_budget_bytes   = static_cast<std::size_t>(52000ULL * kMiB);
+        cache.max_private_continuations = 4;
+        cache.max_shared_prefixes       = 7;
+        ninfer::models::qwen3_5::detail::resolve_host_cache_budget(
+            cache, *cache.max_private_continuations, *cache.max_shared_prefixes, 240000,
+            195897344ULL, 2162688ULL);
+        failures += check(
+            *cache.max_long_anchors_per_continuation == 31 && cache.host_state_slots == 139 &&
+                cache.host_kv_capacity_bytes == 27296221184ULL,
+            "production budget did not resolve to the hand-computed 31 anchors / 139 images / "
+            "27,296,221,184 B Host KV split");
+    }
+
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
 }

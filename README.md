@@ -449,13 +449,13 @@ Configuration used for running it (single 32 GB GPU — stop any other resident 
 first):
 
 ```bat
-ninfer-serve.exe "E:\NInfer-Deploy-V3\qwen3_8_27b_nvfp4-nvidia.ninfer" --host 127.0.0.1 --port 8080 --max-context 240000 --max-concurrency 2 --spec dflash2 --draft-tokens 7 --lm-head-draft --ngram-draft-tokens 15 --ngram-min-match 12 --kv-dtype int8 --preserve-thinking --host-cache-mib 40000 --pending-timeout-ms 900000 --prefill-chunk 4096 --kv-capacity auto --kv-headroom-mib 0 --log-colours on --ngram-archive-mib 2048 --ngram-session-mib 256 --ngram-native-sessions --cuda-graph-allowance-mib 500 --request-log-jsonl log.json --default-thinking-budget 16384 --thinking-budget-message "Considering the limited time available to the user, I must stop thinking now. Time to act:" --tolerant-tool-calls
+ninfer-serve.exe "E:\NInfer-Deploy-V3\qwen3_8_27b_nvfp4-nvidia.ninfer" --host 127.0.0.1 --port 8080 --max-context 240000 --max-concurrency 2 --spec dflash2 --draft-tokens 7 --lm-head-draft --ngram-draft-tokens 15 --ngram-min-match 12 --kv-dtype int8 --preserve-thinking --host-cache-mib 52000 --pending-timeout-ms 900000 --prefill-chunk 4096 --kv-capacity auto --kv-headroom-mib 0 --log-colours on --ngram-archive-mib 2048 --ngram-session-mib 256 --ngram-native-sessions --cuda-graph-allowance-mib 500 --request-log-jsonl log.json --default-thinking-budget 16384 --thinking-budget-message "Considering the limited time available to the user, I must stop thinking now. Time to act:" --tolerant-tool-calls
 ```
 
 This is the current `LaunchQwen3.8-27B-nvidia-dflash2-ngram.bat` launch configuration, with the
-retention tier in its single-knob form. At `--max-concurrency 2` this artifact's 40,000 MiB budget
-resolves to 107 Host StateImages of 195,897,344 B — 23 long anchors per continuation — with the
-remaining ≈20,000 MiB given to Host KV; the resolved split is what the `server_start` memory ledger
+retention tier in its single-knob form. At `--max-concurrency 2` this artifact's 52,000 MiB budget
+resolves to 139 Host StateImages of 195,897,344 B — 31 long anchors per continuation — with the
+remaining ≈26,000 MiB given to Host KV; the resolved split is what the `server_start` memory ledger
 reports.
 
 ## Thanks
