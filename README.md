@@ -317,12 +317,14 @@ derivation and the invariants live in
   escape hatch the pressure fallback cleared both tiers at once, which turned one over-capacity
   request into a wiped cache and a self-sustaining zero-hit steady state.
 - **Recency-ordered eviction ladder** — when Host cannot absorb the pressure either, the fallback
-  ranks every private prefix by recency and sacrifices the oldest rung by rung: rung k fully evicts
-  the k oldest and keeps the rest (demoting wherever Host can take it), and the incremental
-  materialization search may only fully evict inside that LRU tail — so the cache never trades a
-  more recent prefix for an older one's Device KV. The clear-all target remains only as the
-  guaranteed liveness backstop. The fork's `--preserved-recent-prefixes` escape hatch (a configured
-  set of pinned owners, defaulting to none) is removed; the ladder covers every owner instead.
+  ranks every prefix — private conversations and shared prefixes in one order — by its latest hit
+  or publication and sacrifices the oldest rung by rung: rung k fully evicts the k oldest and keeps
+  the rest (demoting private and shared prefixes alike wherever Host can take them), and the
+  incremental materialization search may only fully evict inside that LRU tail — so the cache never
+  trades a more recent prefix for an older one's Device KV. The clear-all target remains only as
+  the guaranteed liveness backstop. The fork's `--preserved-recent-prefixes` escape hatch (a
+  configured set of pinned owners, defaulting to none) is removed; the ladder covers every owner
+  instead.
 - **One Host RAM budget — `--host-cache-mib`** — upstream sizes the retention tier with two
   independent allocations (`--host-state-slots`, `--host-kv-mib`) plus three catalog limits, so the
   RAM actually pinned is their sum and one StateImage costs a full

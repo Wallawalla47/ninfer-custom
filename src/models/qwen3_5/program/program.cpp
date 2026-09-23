@@ -146,9 +146,9 @@ PressureTargetHandle PressurePlanningSession::recency_maximal_target(
     return impl_->recency_maximal_target(candidate, sacrifice_oldest);
 }
 
-std::uint32_t PressurePlanningSession::private_owner_count() const {
+std::uint32_t PressurePlanningSession::ranked_owner_count() const {
     if (impl_ == nullptr) { return 0; }
-    return impl_->private_owner_count();
+    return impl_->ranked_owner_count();
 }
 
 void PressurePlanningSession::set_eviction_licence(std::uint32_t oldest_licensed) noexcept {
@@ -322,7 +322,7 @@ Program::begin_pressure_planning(std::span<const AdmissionCandidate* const> cand
                                  std::span<const runtime::PlanningOwnerId> private_owner_ids,
                                  std::span<const SharedPrefixHandle* const> shared_owners,
                                  std::span<const runtime::PlanningOwnerId> shared_owner_ids,
-                                 std::span<const runtime::PlanningOwnerId> private_recency_order) {
+                                 std::span<const runtime::PlanningOwnerId> recency_order) {
     using SessionImpl = detail::PressurePlanningSessionImpl;
     std::vector<SessionImpl::PhysicalCandidateBinding> physical_candidates;
     physical_candidates.reserve(candidates.size());
@@ -337,7 +337,7 @@ Program::begin_pressure_planning(std::span<const AdmissionCandidate* const> cand
     }
     return PressurePlanningSession(std::make_unique<detail::PressurePlanningSessionImpl>(
         *impl_, physical_candidates, candidate_ids, private_owners, private_owner_ids,
-        shared_owners, shared_owner_ids, private_recency_order));
+        shared_owners, shared_owner_ids, recency_order));
 }
 
 runtime::PrefillWork
@@ -405,7 +405,7 @@ CapturePressurePlanningSession Program::begin_capture_pressure_planning(
     std::span<const runtime::PlanningOwnerId> private_owner_ids,
     std::span<const SharedPrefixHandle* const> shared_owners,
     std::span<const runtime::PlanningOwnerId> shared_owner_ids,
-    std::span<const runtime::PlanningOwnerId> private_recency_order) {
+    std::span<const runtime::PlanningOwnerId> recency_order) {
     CapturePressureCandidate candidate(impl_->make_capture_physical_candidate(assessment));
     using SessionImpl = detail::PressurePlanningSessionImpl;
     const std::array physical_candidates{SessionImpl::PhysicalCandidateBinding{
@@ -415,7 +415,7 @@ CapturePressurePlanningSession Program::begin_capture_pressure_planning(
     const std::array candidate_ids{CapturePressurePlanningSession::candidate_id()};
     PressurePlanningSession session(std::make_unique<detail::PressurePlanningSessionImpl>(
         *impl_, physical_candidates, candidate_ids, private_owners, private_owner_ids,
-        shared_owners, shared_owner_ids, private_recency_order));
+        shared_owners, shared_owner_ids, recency_order));
     return CapturePressurePlanningSession(std::move(candidate), std::move(session));
 }
 
