@@ -50,7 +50,10 @@ more copying work, the ngram-based drafting implementation
 
 **Configuration and launch parameters.** Model: the official NInfer Qwen3.8-27B NVFP4
 artifact `qwen3_8_27b_nvfp4-official.ninfer`; GPU: NVIDIA GeForce RTX 5090; max-context
-180000 for both arms; max-concurrency 2; `--kv-dtype int8`.
+180000 for both arms; max-concurrency 2; `--kv-dtype int8`. This run predates the retention
+changes summarised under **Prefix caching** below, so the fork-arm figures describe that
+earlier tree — its launch list is the pre-budget component form of the cache flags, kept here
+as the record of what was measured.
 
 Launch parameters, this fork (all flags):
 
@@ -286,22 +289,58 @@ fixtures, and the per-component CMake reorganisation.
   upstream PR #162 (above).
 - **`--chat-template`** — load the artifact chat template from a file.
 
-**Features**
+**Prefix caching**
 
-- **Prefix-caching improvements** — a set of context-cache changes that raise the hit
-  rate and reduce refills: salvaging prefilled context when a request is aborted (a
-  retry resumes from the salvaged frontier instead of root), engine-automated anchoring of
-  the last L message boundaries (`--max-long-anchors-per-continuation`), and a
-  correctness fix that clears staged prefill bookkeeping when a lane is published.
-- **LRU-ordered prefix retention** — a private conversation prefix is *demoted* to host
-  (device KV freed, host copy kept, so the active context always fits) instead of being
-  evicted whenever the host tier can take it, for every private owner rather than a
-  configured set. When host cannot take it, the escape-hatch fallback ranks every private
-  prefix by recency and sacrifices the oldest rung by rung: rung k fully evicts the k
-  oldest and keeps the rest (demoting wherever host can take it), and the incremental
-  materialization search may only fully evict inside that LRU tail — so the cache never
-  trades a more recent prefix for an older one's device KV. The clear-all target remains
-  only as the guaranteed liveness backstop.
+The reuse model itself is upstream's: a prefix hit requires a *complete* checkpoint — a StateImage
+plus the Main (and speculative-backend) KV for that exact prompt frontier — so cache capacity is
+accounted in checkpoints and KV page groups, not in tokens. What is local is how that checkpoint set
+is leased, sized, retained and reported under Device pressure. Together these are the changes that
+stopped long multi-turn agentic sessions on this box re-prefilling almost every request; the
+derivation and the invariants live in
+[paged KV context store](docs/maintainer/paged-kv-cache.md) and
+[HTTP serving](docs/serving.md).
+
+- **Bounded, elastic Device KV lease** — upstream reserves each request's full
+  prompt-plus-effective-output KV at admission and holds it to completion, so a client that sends
+  `max_tokens: 64000` for generations averaging a few hundred tokens parks its whole output budget
+  as reserved KV, and a single long-prompt request can reserve the entire pool away from the prefix
+  cache. The fork leases a bounded window (the prompt plus `max(prefill-chunk, 4096)` output tokens)
+  and extends it at a decode-round boundary as generation approaches the window, up to the same
+  output ceiling. Every round is covered by the reservation already held, so an extension is a pure
+  pool reservation — no copy, no graph change, no measurable decode or TTFT cost. When the pool
+  cannot grant the next ladder rung (the margin, then two page groups, then one), the lease settles
+  and the request ends at `finish_reason: length` instead of failing admission or throwing
+  mid-step.
+- **Demote instead of destroy** — a private conversation prefix that loses Device KV is demoted to
+  Host (device pages freed, host copy kept, so the active context always fits) whenever the Host
+  tier can take it, for every private owner rather than a configured subset. Under upstream's
+  escape hatch the pressure fallback cleared both tiers at once, which turned one over-capacity
+  request into a wiped cache and a self-sustaining zero-hit steady state.
+- **Recency-ordered eviction ladder** — when Host cannot absorb the pressure either, the fallback
+  ranks every private prefix by recency and sacrifices the oldest rung by rung: rung k fully evicts
+  the k oldest and keeps the rest (demoting wherever Host can take it), and the incremental
+  materialization search may only fully evict inside that LRU tail — so the cache never trades a
+  more recent prefix for an older one's Device KV. The clear-all target remains only as the
+  guaranteed liveness backstop. The fork's `--preserved-recent-prefixes` escape hatch (a configured
+  set of pinned owners, defaulting to none) is removed; the ladder covers every owner instead.
+- **One Host RAM budget — `--host-cache-mib`** — upstream sizes the retention tier with two
+  independent allocations (`--host-state-slots`, `--host-kv-mib`) plus three catalog limits, so the
+  RAM actually pinned is their sum and one StateImage costs a full
+  `memory.host_state_image_bytes` (~187 MiB on Qwen3.8-27B NVFP4 with DFlash2) regardless of the
+  prefix depth it holds. The fork derives the whole tier from a single pinned-RAM ceiling: it counts
+  the checkpoint inventory the capture path creates, `(2 + long anchors) × private continuations +
+  shared prefixes` images, caps State at half the budget, spends the remaining state headroom on
+  **more long anchors per continuation** — bounded by the anchor count whose re-prefill gap still
+  outweighs one image — re-sizes the pool for the grown count, gives Host KV the remainder, and
+  refuses to start rather than overcommit. The conversation count follows `--max-concurrency`
+  (default `2×`), and the leftover budget is divided across those owners as extra anchors, so a
+  low-concurrency server buys depth per conversation and a high-concurrency server buys breadth. The
+  component flags still work standalone and are rejected alongside a budget.
+- **Salvaged prefills and automatic anchoring** — prefilled context is salvaged when a request is
+  aborted, so a retry resumes from the salvaged frontier instead of from root; the engine anchors
+  the last N message boundaries of a conversation automatically
+  (`--max-long-anchors-per-continuation`); and a lane publishes with its staged-prefill bookkeeping
+  cleared.
 - **Cost-scaled materialization search budget** — addresses the crux of
   [Neroued/ninfer#229](https://github.com/Neroued/ninfer/issues/229): the flat 5 ms
   under-pressure materialization-search budget is not sufficient — it only manages to
@@ -319,6 +358,22 @@ fixtures, and the per-component CMake reorganisation.
   suggested by albertov: reclaim the least-recently-used eligible automatic entry when a
   candidate finds no vacant slot, and count reclaimable slots as publication slack so the
   materialization selection stops discarding automatic candidates at saturation.
+- **Lease and resolved-capacity observability** — the `--request-log-jsonl` occupancy record reports
+  the unmaterialised part of the Device KV lease separately from `allocated + reserved` pages, so a
+  leased-but-unwritten pool is visible as a lease rather than indistinguishable from real KV, and
+  the `server_start` memory ledger reports the Host tier's *resolved* slot counts with both unit
+  costs and the derived budget split, not the requested ones.
+
+Measured net effect on a replay of the traffic that motivated this — 26 multi-turn tool-agent
+requests, `--host-cache-mib 40000`, Qwen3.8-27B NVFP4 + DFlash2, `--max-concurrency 2`, RTX 5090:
+token-level prefix reuse 90.75 % overall and 98.08 % once warm, against 1.44 % across the
+chronic production window the replay was built from; private owners fully evicted dropped from 179
+to 2–3 and clear-all fallbacks from 55 to 0–1, with no mid-conversation root fallback anywhere. The
+replay runs 3.7 minutes, so it demonstrates the mechanism rather than hours-long saturation
+behaviour.
+
+**Features**
+
 - **Ngram copy drafting above one concurrent request** — the local contribution here is
   the C>1 extension of remesis's C=1 implementation: it makes ngram copy drafting work
   with more than one concurrent request across MTP/DFlash/DFlash2, with a per-lane
@@ -367,10 +422,13 @@ Configuration used for running it (single 32 GB GPU — stop any other resident 
 first):
 
 ```bat
-ninfer-serve.exe "E:\NInfer-Deploy-V3-output\qwen3_8_27b_nvfp4-quasar-proposal.ninfer" --host 127.0.0.1 --port 8080 --max-context 240000 --max-concurrency 2 --spec dflash2 --draft-tokens 7 --lm-head-draft --ngram-draft-tokens 15 --ngram-min-match 12 --kv-dtype int8 --preserve-thinking --host-kv-mib 24000 --pending-timeout-ms 900000 --prefill-chunk 2048 --kv-capacity auto --kv-headroom-mib 0 --log-colours on --host-state-slots 64 --max-private-continuations 32 --max-long-anchors-per-continuation 8 --max-shared-prefixes 32 --ngram-archive-mib 2048 --ngram-session-mib 256 --ngram-native-sessions --cuda-graph-allowance-mib 500 --request-log-jsonl log.json --default-thinking-budget 32000 --thinking-budget-message "I'm done thinking. Time to act:"
+ninfer-serve.exe "E:\NInfer-Deploy-V3-output\qwen3_8_27b_nvfp4-quasar-proposal.ninfer" --host 127.0.0.1 --port 8080 --max-context 240000 --max-concurrency 2 --spec dflash2 --draft-tokens 7 --lm-head-draft --ngram-draft-tokens 15 --ngram-min-match 12 --kv-dtype int8 --preserve-thinking --host-cache-mib 40000 --pending-timeout-ms 900000 --prefill-chunk 2048 --kv-capacity auto --kv-headroom-mib 0 --log-colours on --ngram-archive-mib 2048 --ngram-session-mib 256 --ngram-native-sessions --cuda-graph-allowance-mib 500 --request-log-jsonl log.json --default-thinking-budget 32000 --thinking-budget-message "I'm done thinking. Time to act:"
 ```
 
-This is the current `LaunchQwen3.8-27B-quasar-dflash2-ngram.bat` launch configuration.
+This is the `LaunchQwen3.8-27B-quasar-dflash2-ngram.bat` configuration with the retention tier
+in its single-knob form: the `.bat`'s `--host-kv-mib` / `--host-state-slots` /
+`--max-long-anchors-per-continuation` / catalog flags are replaced by the one `--host-cache-mib`
+ceiling, which rejects them alongside it.
 
 **[Qwen3.8-27B-NVIDIA-NVFP4-NInferV3](https://huggingface.co/Wallawalla47/Qwen3.8-27B-NVIDIA-NVFP4-NInferV3)**
 on Hugging Face — a single-file `.ninfer` engine artifact of
@@ -390,11 +448,14 @@ Configuration used for running it (single 32 GB GPU — stop any other resident 
 first):
 
 ```bat
-ninfer-serve.exe "E:\NInfer-Deploy-V3\qwen3_8_27b_nvfp4-nvidia.ninfer" --host 127.0.0.1 --port 8080 --max-context 240000 --max-concurrency 2 --spec dflash2 --draft-tokens 7 --lm-head-draft --ngram-draft-tokens 15 --ngram-min-match 8 --kv-dtype int8 --preserve-thinking --host-kv-mib 24000 --pending-timeout-ms 900000 --prefill-chunk 2048 --kv-capacity auto --kv-headroom-mib 0 --log-colours on --host-state-slots 64 --max-private-continuations 32 --max-long-anchors-per-continuation 8 --max-shared-prefixes 32 --ngram-archive-mib 2048 --ngram-session-mib 256 --ngram-native-sessions --cuda-graph-allowance-mib 500 --request-log-jsonl log.json --default-thinking-budget 32000 --thinking-budget-message "Considering the limited time available to the user, I must stop thinking now. Time to act:"
+ninfer-serve.exe "E:\NInfer-Deploy-V3\qwen3_8_27b_nvfp4-nvidia.ninfer" --host 127.0.0.1 --port 8080 --max-context 240000 --max-concurrency 2 --spec dflash2 --draft-tokens 7 --lm-head-draft --ngram-draft-tokens 15 --ngram-min-match 8 --kv-dtype int8 --preserve-thinking --host-cache-mib 40000 --pending-timeout-ms 900000 --prefill-chunk 2048 --kv-capacity auto --kv-headroom-mib 0 --log-colours on --ngram-archive-mib 2048 --ngram-session-mib 256 --ngram-native-sessions --cuda-graph-allowance-mib 500 --request-log-jsonl log.json --default-thinking-budget 32000 --thinking-budget-message "Considering the limited time available to the user, I must stop thinking now. Time to act:"
 ```
 
-This is the current `LaunchQwen3.8-27B-nvidia-dflash2-ngram.bat` launch
-configuration.
+This is the `LaunchQwen3.8-27B-nvidia-dflash2-ngram.bat` configuration with the retention tier
+in its single-knob form (the same substitution as above). At `--max-concurrency 2` this
+artifact's 40,000 MiB budget resolves to 107 Host StateImages of 195,897,344 B — 24 long
+anchors per continuation — with the remaining ≈20,000 MiB given to Host KV; the resolved split is
+what the `server_start` memory ledger reports.
 
 ## Thanks
 
