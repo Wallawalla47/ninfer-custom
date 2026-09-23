@@ -64,14 +64,13 @@ Launch parameters, this fork (all flags):
 --ngram-archive-mib 2048 --ngram-session-mib 256 --ngram-native-sessions
 --cuda-graph-allowance-mib 500 --default-thinking-budget 16384
 --thinking-budget-message "Considering the limited time available to the user, I must stop
-thinking now. Time to act:" --preserved-recent-prefixes 3
+thinking now. Time to act:"
 ```
 
 Launch parameters, upstream + Windows port (same list minus the fork-only flags it does
 not support, which are dropped: `--ngram-draft-tokens`, `--ngram-min-match`,
 `--kv-headroom-mib`, `--log-colours`, `--ngram-archive-mib`, `--ngram-session-mib`,
-`--ngram-native-sessions`, `--cuda-graph-allowance-mib`, `--thinking-budget-message`,
-`--preserved-recent-prefixes`):
+`--ngram-native-sessions`, `--cuda-graph-allowance-mib`, `--thinking-budget-message`):
 
 ```text
 --host 127.0.0.1 --port 8080 --max-context 180000 --max-concurrency 2 --spec dflash2
@@ -294,15 +293,15 @@ fixtures, and the per-component CMake reorganisation.
   retry resumes from the salvaged frontier instead of root), engine-automated anchoring of
   the last L message boundaries (`--max-long-anchors-per-continuation`), and a
   correctness fix that clears staged prefill bookkeeping when a lane is published.
-- **`--preserved-recent-prefixes N`** — keep the N most recent private conversation
-  prefixes protected from cache pressure: they are never evicted by the under-pressure
-  materialization search as long as there is space available (they may still be demoted
-  to host, freeing device KV but keeping the host copy, so the active context always
-  fits). If that search finds no usable solution within the materialization-search
-  budget, the escape-hatch fallback no longer jumps straight to evicting everything from
-  the cache — it evicts the least-recently-used prefixes, one rung at a time (demoting
-  the newer preserved ones to host), until there is enough space for materialization;
-  the clear-all target remains only as the guaranteed liveness backstop.
+- **LRU-ordered prefix retention** — a private conversation prefix is *demoted* to host
+  (device KV freed, host copy kept, so the active context always fits) instead of being
+  evicted whenever the host tier can take it, for every private owner rather than a
+  configured set. When host cannot take it, the escape-hatch fallback ranks every private
+  prefix by recency and sacrifices the oldest rung by rung: rung k fully evicts the k
+  oldest and keeps the rest (demoting wherever host can take it), and the incremental
+  materialization search may only fully evict inside that LRU tail — so the cache never
+  trades a more recent prefix for an older one's device KV. The clear-all target remains
+  only as the guaranteed liveness backstop.
 - **Cost-scaled materialization search budget** — addresses the crux of
   [Neroued/ninfer#229](https://github.com/Neroued/ninfer/issues/229): the flat 5 ms
   under-pressure materialization-search budget is not sufficient — it only manages to
@@ -391,7 +390,7 @@ Configuration used for running it (single 32 GB GPU — stop any other resident 
 first):
 
 ```bat
-ninfer-serve.exe "E:\NInfer-Deploy-V3\qwen3_8_27b_nvfp4-nvidia.ninfer" --host 127.0.0.1 --port 8080 --max-context 240000 --max-concurrency 2 --spec dflash2 --draft-tokens 7 --lm-head-draft --ngram-draft-tokens 15 --ngram-min-match 8 --kv-dtype int8 --preserve-thinking --host-kv-mib 24000 --pending-timeout-ms 900000 --prefill-chunk 2048 --kv-capacity auto --kv-headroom-mib 0 --log-colours on --host-state-slots 64 --max-private-continuations 32 --max-long-anchors-per-continuation 8 --max-shared-prefixes 32 --ngram-archive-mib 2048 --ngram-session-mib 256 --ngram-native-sessions --cuda-graph-allowance-mib 500 --request-log-jsonl log.json --default-thinking-budget 32000 --thinking-budget-message "Considering the limited time available to the user, I must stop thinking now. Time to act:" --preserved-recent-prefixes 3
+ninfer-serve.exe "E:\NInfer-Deploy-V3\qwen3_8_27b_nvfp4-nvidia.ninfer" --host 127.0.0.1 --port 8080 --max-context 240000 --max-concurrency 2 --spec dflash2 --draft-tokens 7 --lm-head-draft --ngram-draft-tokens 15 --ngram-min-match 8 --kv-dtype int8 --preserve-thinking --host-kv-mib 24000 --pending-timeout-ms 900000 --prefill-chunk 2048 --kv-capacity auto --kv-headroom-mib 0 --log-colours on --host-state-slots 64 --max-private-continuations 32 --max-long-anchors-per-continuation 8 --max-shared-prefixes 32 --ngram-archive-mib 2048 --ngram-session-mib 256 --ngram-native-sessions --cuda-graph-allowance-mib 500 --request-log-jsonl log.json --default-thinking-budget 32000 --thinking-budget-message "Considering the limited time available to the user, I must stop thinking now. Time to act:"
 ```
 
 This is the current `LaunchQwen3.8-27B-nvidia-dflash2-ngram.bat` launch

@@ -99,7 +99,6 @@ BAT_FLAGS = [
     ("--default-thinking-budget", "16384"),
     ("--thinking-budget-message", "Considering the limited time available to the user, "
      "I must stop thinking now. Time to act:"),
-    ("--preserved-recent-prefixes", "3"),
 ]
 
 

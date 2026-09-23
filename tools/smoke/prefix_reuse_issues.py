@@ -6,7 +6,7 @@ plus the CPU resource-manager suite (which covers the cost-scaled search budget 
 the shared-catalog reclaim at their proper planner level, without a GPU).
 
 Covered changes:
-  1. --preserved-recent-prefixes escape hatch     -> scenario "preserved-recent-prefixes"
+  1. recency-ordered prefix retention           -> scenario "recency-retention"
   2. Issue #229 cost-scaled materialization budget -> ninfer_resource_manager_test (unit)
   3. Issue #251 shared-catalog saturation reclaim  -> scenario "shared-saturation-reclaim"
      plus "shared-replacement" as the adjacent explicit-candidate capacity path.
@@ -139,7 +139,7 @@ class Issue:
 
 
 ISSUES = [
-    Issue("preserved-recent-prefixes escape hatch", "e2e", "preserved-recent-prefixes"),
+    Issue("recency-ordered prefix retention", "e2e", "recency-retention"),
     Issue("issue #251 shared-catalog saturation reclaim", "e2e", "shared-saturation-reclaim"),
     Issue("issue #251 shared reuse at full capacity", "e2e", "shared-replacement"),
     # Realistic agent scenarios (system + tools shared prefix, growing multi-turn conversation

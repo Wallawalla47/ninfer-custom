@@ -130,14 +130,6 @@ std::string serve_usage_text(const char* argv0) {
            "  --max-shared-prefixes N          bounded shared prefix catalogs\n"
            "                                    (default = max(concurrency," +
            std::to_string(kMaximumPreparedPromptCacheCandidatesPerRequest) + "))\n"
-           "  --preserved-recent-prefixes N   keep the N most recent conversation prefixes\n"
-           "                                  eviction-immune: the under-pressure materialization\n"
-           "                                  search will not evict them while space remains; if\n"
-           "                                  that search finds no usable solution within its\n"
-           "                                  budget, the fallback escape hatch demotes and evicts\n"
-           "                                  the least-recently-used prefixes until the\n"
-           "                                  materialization fits, instead of clearing the whole\n"
-           "                                  cache (default 0 = off; recommend ~ concurrency + 1)\n"
            "  --no-prefix-reuse          disable compatible-prefix caching\n"
            "                             (enabled by default)\n"
            "\n"
@@ -384,10 +376,6 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                 parse_nonnegative_int(require_value("--max-long-anchors-per-continuation"),
                                       "max-long-anchors-per-continuation"));
             context_capacity_explicit = true;
-        } else if (arg == "--preserved-recent-prefixes") {
-            options.context_cache.preserved_recent_prefixes = static_cast<std::uint32_t>(
-                parse_nonnegative_int(require_value("--preserved-recent-prefixes"),
-                                      "preserved-recent-prefixes"));
         } else if (arg == "--request-log-jsonl") {
             options.request_log_jsonl = require_value("--request-log-jsonl");
             if (options.request_log_jsonl.empty()) {
