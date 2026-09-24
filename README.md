@@ -286,10 +286,12 @@ and [HTTP serving](docs/serving.md).
 - **Device KV is leased, not reserved up front.** Upstream holds each request's full
   prompt-plus-output KV from admission to completion, so a `max_tokens: 64000` client parks its
   whole output budget and one long request can starve the cache. The fork leases the prompt plus
-  a bounded output window and extends it at decode-round boundaries. If the pool cannot extend
-  the lease, the request ends with `finish_reason: length` instead of failing. The request log
-  and `server_start` ledger report the lease separately from real occupancy, and show the
-  resolved Host tier sizes.
+  a bounded output window and extends it at decode-round boundaries. When the pool has no space
+  for the extension, the engine releases idle retained cache owners (least recently used first,
+  only owners that hold Device pages) and extends the lease, so a live answer outranks retained
+  cache. Only if nothing can be freed does the request end with `finish_reason: length` instead
+  of failing. The request log and `server_start` ledger report the lease separately from real
+  occupancy, and show the resolved Host tier sizes.
 - **Pressure demotes before it destroys.** A prefix that loses its Device KV is moved to Host
   whenever Host can take it, for private conversations and shared prefixes alike. Upstream's
   pressure fallback cleared both tiers at once.
@@ -456,21 +458,27 @@ fail on the tree before these changes. The four `review-*` scenarios fail there 
   - **Cache-reuse caveat:** with both arms at the same effective chunk size, prefix-cache
     decisions were identical (average TTFT −19 %). When the chunk sizes differ (e.g.
     requesting `4096`, which the flag runs as `3584`), the time-boxed materialization
-    search can take a different path. In particular, the second request of a concurrent
-    pair gets a 35–40 ms search budget and can miss a large reusable anchor. That is a
-    planner property that either kernel can trip.
+    search can take a different path. The admission planning allowance is now 250 ms even
+    while another request runs (it was 50 ms), so the second request of a concurrent pair no
+    longer loses a large reusable anchor to a 35–40 ms search.
 
-**Diagnostics**
+**Prefix cache and output length**
 
-- **Device KV lease settlement warning** — when a request's Device KV lease cannot grow, the
-  request finishes at the lease's frontier with `output_limit` (`finish_reason: "length"`),
-  well short of the client's `max_tokens`. A production Qwen Code session hit this on 8 of 53
-  requests, all stopping at 4,014–4,064 output tokens (the first 4,096-token lease window),
-  several mid-reasoning, even while half the Device KV pool was free. It did not reproduce on a
-  fresh server, so `ninfer-serve` now prints one `warning: Device KV lease cannot grow` line per
-  settlement. The line gives each growth rung's outcome (refused by the ceiling or cap, or no
-  space), the requested tokens, the lease ceiling, and both pools' capacity, allocated, reserved
-  and available pages, so the next occurrence names its cause.
+- **Retained cache gives Device KV back to a running answer** — a request's Device KV lease
+  starts at the prompt plus a 4,096-token output window and grows as it decodes. When the pool
+  was full of retained prefixes, growth failed and the answer stopped at about 4,000 tokens with
+  `finish_reason: "length"`, often mid-reasoning (a production Qwen Code session hit this on
+  8 of 53 requests, and a cold 38K-token prompt was cut at 4,018 tokens four times in a row).
+  The engine now releases idle retained owners, least recently used first and only owners that
+  hold Device pages, until the next growth step fits, then extends the lease. It logs
+  `[engine] Device KV lease of lane N extended: released K retained cache owner(s)`, and a
+  once-per-request `[engine] warning` if nothing can be freed. In a reproduction with a
+  40,960-token pool, the answer previously stopped at 4,059 of 12,000 tokens; it now completes
+  after releasing three retained owners.
+- **Full admission planning allowance under concurrency** — the materialization search budget
+  was capped at 50 ms whenever another request was running, and the second request of a
+  concurrent pair then missed an 81K-token reusable anchor and re-prefilled cold. The allowance
+  is now 250 ms in both cases; the concurrent decode pauses at most that once per admission.
 
 **Numerics**
 
