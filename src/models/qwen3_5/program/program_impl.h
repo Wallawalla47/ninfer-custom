@@ -295,6 +295,9 @@ struct PendingCandidate {
     std::uint32_t base_S        = 0;
     std::uint32_t prompt_tokens = 0;
     std::uint32_t produced      = 0;
+    // Draft columns the speculative round verified: its egress/frame row stride is this + 1 and
+    // its ReplaySSM records use the matching record view.
+    std::uint32_t verify_drafts = 0;
 };
 
 enum class Lifecycle : std::uint8_t {
@@ -649,12 +652,13 @@ public:
     std::unique_ptr<StateImageStore> state_store;
     std::optional<GdnReplayRecords> replay_records;
     std::optional<ops::GdnReplayFoldPlan> replay_fold;
+    // When the DFlash neural and ngram windows differ, rounds of the narrower family verify at
+    // their own width for every batch size. They record ReplaySSM transitions through a dense
+    // narrowed view of the same record storage and are replayed by the matching fold plan.
+    std::optional<GdnReplayRecords> narrow_replay_records;
+    std::optional<ops::GdnReplayFoldPlan> narrow_replay_fold;
     std::optional<DFlashPersistentState> dflash;
     qwen3_5::RoundState io;
-    // Single-row DFlash decode frame at the frame's native width (plan.draft_window). Hosts the
-    // narrower family's single-row graph profiles and rounds, which run narrowed via
-    // single_row_prefix, when the batch>1 native frame cannot be narrowed to that window.
-    std::optional<qwen3_5::RoundState> round_single;
     Tensor prefill_hidden;
     std::optional<Tensor> score_hidden;
     Tensor sampling_config;
@@ -1218,11 +1222,17 @@ private:
     [[nodiscard]] runtime::PrefillStepResult
     advance_prefill(SequenceState& sequence, RequestControl& request,
                     runtime::ExecutionTiming* failed_timing);
+    // Row-0 DFlash frame controls (lane, state slots, backend KV row) read by a prefill's
+    // feature sink. The frame is shared with decode rounds, so every prefill step re-uploads them.
+    void upload_dflash_prefill_controls(const SequenceState& sequence);
     void enqueue_dflash_context_append(std::span<const std::uint32_t> lanes,
                                        std::span<const std::uint32_t> starts,
                                        std::span<const std::uint32_t> counts);
     void validate_licensed_tokens(std::span<const TokenId> tokens) const;
     void mark_workspace_usage(std::size_t phase_bytes) noexcept;
+    // ReplaySSM record view and fold plan for a speculative round verified at verify_drafts.
+    [[nodiscard]] const GdnReplayRecords* round_replay_records(std::uint32_t verify_drafts) const;
+    [[nodiscard]] const ops::GdnReplayFoldPlan& round_replay_fold(std::uint32_t verify_drafts) const;
     [[nodiscard]] std::vector<NgramProposer::Match>
     propose_ngram(std::span<const std::uint32_t> lanes,
                   std::span<const runtime::RoundBudget> budgets);

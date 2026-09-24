@@ -37,21 +37,28 @@ Ngram does not convert one drafter into another. `--ngram-draft-tokens 0` disabl
 feature; the minimum match defaults to 12 and its supported enabled range is 4..64.
 
 At `--max-concurrency > 1` each round is a batch of up to `--max-concurrency` active requests.
-A speculative decode frame is allocated at the wider of the neural and ngram windows and cannot be
-narrowed for a multi-request frame. The GDN conv-record workspace behind the recurrent state also
-admits at most 16 verification columns once the batch holds more than one request, so a verify
-width above 15 is admitted only at `--max-concurrency 1`. This caps the ngram width the same way
-for every backend; `--ngram-draft-tokens 15` is the widest value usable with concurrency.
+The GDN conv-record workspace behind the recurrent state admits at most 16 verification columns
+once the batch holds more than one request, so a verify width above 15 is admitted only at
+`--max-concurrency 1`. This caps the ngram width the same way for every backend;
+`--ngram-draft-tokens 15` is the widest value usable with concurrency.
 
-Rows without a copy proposal in an ngram round are masked and may decode a single token, while an
-all-neural round returns to the neural provider. Every round verifies at the decode frame's native
-width (the wider of the neural and ngram windows); unused columns are masked and output budgets do
-not select a different ngram arithmetic shape. Larger widths can reduce target rounds on long copy
-spans but increase per-round attention, projection, replay and workspace costs, so measure both
-short and long contexts; the longest supported width need not be fastest.
-DFlash and DFlash2 retain an append buffer sized for the widest provider: even
-a narrow neural round must catch up target features from a preceding wide copy round.
-That padded append work is an additional cost when ngram is enabled.
+With DFlash and DFlash2 every round verifies at its provider's own window for any batch size: an
+all-neural round runs at the neural window, and a round in which at least one row has a copy
+proposal runs at the ngram window. The decode frame is allocated at the wider of the two windows
+and viewed densely at the round's width. In a multi-request ngram round the neural drafter also
+runs and each row with a copy proposal takes it, so a row without a match keeps its neural
+proposal for that round. The narrower window records GDN replay transitions through a narrowed
+view of the same record storage. DFlash and DFlash2 retain an append buffer sized for the widest
+provider: a narrow neural round must catch up target features from a preceding wide copy round.
+
+MTP verifies every round at the frame's native width (the wider of the neural and ngram windows);
+unused columns are masked, and a row with a copy proposal and a row without one each use their
+own proposal in the same round.
+
+Larger widths can reduce target rounds on long copy spans but increase per-round attention,
+projection, replay and workspace costs, so measure both short and long contexts; the longest
+supported width need not be fastest. Output budgets do not select a different ngram arithmetic
+shape.
 
 The mixed-FP8 27B target retains 16-bit activations for FP8 residual projections
 during 17..64-column single-request verification. Its ordinary narrow path uses
