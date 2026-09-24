@@ -159,7 +159,9 @@ your own builds and flags.
 - **PR #300 (unreachable checkpoints)** — exclude a checkpoint the incoming request cannot reach
   from the portfolio recovery-loss accounting, so the planner stops crediting an owner for a
   prefix hit that request could never take, by [pkochubey](https://github.com/pkochubey).
-  Resolves upstream issue [#178](https://github.com/Neroued/ninfer/issues/178).
+  Resolves upstream issue [#178](https://github.com/Neroued/ninfer/issues/178). The fork later narrowed
+  it: only a checkpoint its own session has moved past loses its value (see **Prefix caching**
+  below).
 
 Recurring merges from upstream `master` additionally bring in ongoing kernel and build
 work: NVFP4/Q8/sparse-MoE dispatch tuning, whole-tile W4A4 TMA scale routing, the real
@@ -256,6 +258,88 @@ fixtures, and the per-component CMake reorganisation.
 
 ## Local changes
 
+**Prefix caching**
+
+The reuse model is still upstream's. A prefix hit needs a *complete* checkpoint, meaning a
+StateImage plus the Main (and speculative-backend) KV at that exact prompt frontier, so capacity
+is counted in checkpoints and KV page groups, not tokens. What this fork changes is how that
+checkpoint set is leased, sized, valued, retained and evicted when the Device is under pressure.
+Upstream tends to re-prefill almost every request in long multi-turn agent sessions; with these
+changes the fork mostly reuses them. The invariants and derivations are in
+[paged KV context store](docs/maintainer/paged-kv-cache.md),
+[resource scheduling and context cache](docs/maintainer/resource-scheduling-and-context-cache.md)
+and [HTTP serving](docs/serving.md).
+
+- **Device KV is leased, not reserved up front.** Upstream holds each request's full
+  prompt-plus-output KV from admission to completion, so a `max_tokens: 64000` client parks its
+  whole output budget and one long request can starve the cache. The fork leases the prompt plus
+  a bounded output window and extends it at decode-round boundaries. If the pool cannot extend
+  the lease, the request ends with `finish_reason: length` instead of failing. The request log
+  and `server_start` ledger report the lease separately from real occupancy, and show the
+  resolved Host tier sizes.
+- **Pressure demotes before it destroys.** A prefix that loses its Device KV is moved to Host
+  whenever Host can take it, for private conversations and shared prefixes alike. Upstream's
+  pressure fallback cleared both tiers at once.
+- **When something must go, the oldest goes, and only what is needed.**
+  - *One recency order.* Private conversations and shared prefixes are ranked together by their
+    latest hit *or publication*, so a conversation that has just finished counts as recently used.
+  - *The escape-hatch ladder* gives up the oldest owners first, then spares every sacrificed
+    owner the admission does not actually need. For example, a shortage of private catalog slots
+    no longer destroys shared prefixes.
+  - *If demotion cannot happen,* the ladder retries a rung with the kept owners left in place,
+    and it treats sacrificing every ranked owner as a real rung. The clear-all target is only a
+    last-resort liveness backstop.
+  - *Other admission candidates* are bounded by their own ladder, never by a clear-all.
+  - *A fallback that cannot seal* makes the admission wait and re-plan instead of failing every
+    request.
+- **Retention value reflects future use.** A checkpoint loses its value only when its own session
+  sends a prompt that has moved past it. Prefixes the current request cannot use (other
+  conversations, shared prefixes) keep their value, instead of looking free to evict. This narrows
+  the upstream PR #300 unreachable-checkpoint change listed above.
+- **One Host RAM budget: `--host-cache-mib`.** Upstream sizes the Host tier from two independent
+  allocations plus catalog limits, so the pinned RAM is their sum. The fork derives the whole tier
+  from one pinned-RAM ceiling. It sizes the StateImage pool for the checkpoint inventory the
+  capture path really creates, spends spare state headroom on more long anchors per conversation,
+  gives Host KV the remainder, and refuses to start rather than overcommit.
+- **Engine-automatic long anchors.**
+  - *Automatic placement.* Message boundaries are anchored without client markers
+    (`--max-long-anchors-per-continuation`), so rewriting an older message resumes from a nearby
+    anchor instead of from the start.
+  - *Geometric spacing.* The grid widens back from the prompt end (`--long-anchor-spacing`,
+    default 1024 tokens), so short tool-loop turns do not each cost an anchor and deep history
+    stays covered.
+  - *Replacement.* A full anchor set gives up the anchor whose loss costs the least coverage,
+    rather than the deepest one.
+- **Nothing prefilled is thrown away.** An aborted request publishes the context it had already
+  prefilled, so a retry resumes from that point. A lane publishes with its staged-prefill
+  bookkeeping cleared.
+- **Shared captures cannot take the engine down.** A shared-prefix capture seals under the same
+  seal-window claim as materialization, and skips the capture (it is optional) instead of
+  throwing if the seal fails.
+- **Cost-scaled materialization search budget.** Addresses the crux of
+  [Neroued/ninfer#229](https://github.com/Neroued/ninfer/issues/229): the flat 5 ms
+  under-pressure search budget only covers about 10 targets before it times out, so valuable
+  plans are missed. Implements the solution suggested by Gene0Liu: the budget scales with the
+  incumbent's cost, from a 5 ms floor to a 250 ms cap.
+- **Automatic shared-prefix catalog reclaim.** Looks to resolve
+  [Neroued/ninfer#251](https://github.com/Neroued/ninfer/issues/251): once every
+  `--max-shared-prefixes` slot was resident, automatic candidates were dropped and shared-prefix
+  reuse froze until restart. Implements the solution suggested by albertov: reclaim the least
+  recently used eligible automatic entry. Here that means oldest by latest hit or publication, and
+  the entry is released only when the capture that publishes into its slot is selected.
+
+Measured on a replay of the traffic that motivated this work (26 multi-turn tool-agent requests,
+`--host-cache-mib 40000`, Qwen3.8-27B NVFP4 + DFlash2, `--max-concurrency 2`, RTX 5090):
+
+- Token-level prefix reuse was 90.75 % overall and 98.08 % once warm, against 1.44 % in the
+  production window the replay was built from.
+- Fully evicted private owners fell from 179 to 2–3, and clear-all fallbacks from 55 to 0–1.
+
+The replay predates the later ladder and valuation fixes and runs for only 3.7 minutes. On the
+same GPU, all 18 engine-real prefix scenarios in `ninfer_qwen3_5_prefix_real_test` pass. That
+includes `shared-saturation-reclaim`, `shared-replacement` and `private-checkpoint-pressure`, which
+fail on the tree before these changes. The four `review-*` scenarios fail there too and pass here.
+
 **Platform**
 
 - **Native Windows build and run** — MSVC + CUDA on Windows: static CUDA runtime,
@@ -288,97 +372,6 @@ fixtures, and the per-component CMake reorganisation.
 - **llama.cpp-compatible `/v1/models` metadata** — the local re-implementation of
   upstream PR #162 (above).
 - **`--chat-template`** — load the artifact chat template from a file.
-
-**Prefix caching**
-
-The reuse model itself is upstream's: a prefix hit requires a *complete* checkpoint — a StateImage
-plus the Main (and speculative-backend) KV for that exact prompt frontier — so cache capacity is
-accounted in checkpoints and KV page groups, not in tokens. What is local is how that checkpoint set
-is leased, sized, retained and reported under Device pressure. Together these are the changes that
-stopped long multi-turn agentic sessions on this box re-prefilling almost every request; the
-derivation and the invariants live in
-[paged KV context store](docs/maintainer/paged-kv-cache.md) and
-[HTTP serving](docs/serving.md).
-
-- **Bounded, elastic Device KV lease** — upstream reserves each request's full
-  prompt-plus-effective-output KV at admission and holds it to completion, so a client that sends
-  `max_tokens: 64000` for generations averaging a few hundred tokens parks its whole output budget
-  as reserved KV, and a single long-prompt request can reserve the entire pool away from the prefix
-  cache. The fork leases a bounded window (the prompt plus `max(prefill-chunk, 4096)` output tokens)
-  and extends it at a decode-round boundary as generation approaches the window, up to the same
-  output ceiling. Every round is covered by the reservation already held, so an extension is a pure
-  pool reservation — no copy, no graph change, no measurable decode or TTFT cost. When the pool
-  cannot grant the next ladder rung (the margin, then two page groups, then one), the lease settles
-  and the request ends at `finish_reason: length` instead of failing admission or throwing
-  mid-step.
-- **Demote instead of destroy** — a private conversation prefix that loses Device KV is demoted to
-  Host (device pages freed, host copy kept, so the active context always fits) whenever the Host
-  tier can take it, for every private owner rather than a configured subset. Under upstream's
-  escape hatch the pressure fallback cleared both tiers at once, which turned one over-capacity
-  request into a wiped cache and a self-sustaining zero-hit steady state.
-- **Recency-ordered eviction ladder** — when Host cannot absorb the pressure either, the fallback
-  ranks every prefix — private conversations and shared prefixes in one order — by its latest hit
-  or publication and sacrifices the oldest rung by rung: rung k fully evicts the k oldest and keeps
-  the rest (demoting private and shared prefixes alike wherever Host can take them), and the
-  incremental materialization search may only fully evict inside that LRU tail — so the cache never
-  trades a more recent prefix for an older one's Device KV. The clear-all target remains only as
-  the guaranteed liveness backstop. The fork's `--preserved-recent-prefixes` escape hatch (a
-  configured set of pinned owners, defaulting to none) is removed; the ladder covers every owner
-  instead.
-- **One Host RAM budget — `--host-cache-mib`** — upstream sizes the retention tier with two
-  independent allocations (`--host-state-slots`, `--host-kv-mib`) plus three catalog limits, so the
-  RAM actually pinned is their sum and one StateImage costs a full
-  `memory.host_state_image_bytes` (~187 MiB on Qwen3.8-27B NVFP4 with DFlash2) regardless of the
-  prefix depth it holds. The fork derives the whole tier from a single pinned-RAM ceiling: it counts
-  the checkpoint inventory the capture path creates, `(2 + long anchors) × private continuations +
-  shared prefixes` images, caps State at half the budget, spends the remaining state headroom on
-  **more long anchors per continuation** — bounded by the anchor count whose re-prefill gap still
-  outweighs one image — re-sizes the pool for the grown count, gives Host KV the remainder, and
-  refuses to start rather than overcommit. The conversation count follows `--max-concurrency`
-  (default `2×`) and the shared-prefix catalog `max(concurrency, 7)`, so the leftover budget is
-  divided across those owners as extra anchors: a low-concurrency server buys depth per conversation,
-  a high-concurrency server buys breadth. The component flags still work standalone and are rejected
-  alongside a budget.
-- **Salvaged prefills and automatic anchoring** — prefilled context is salvaged when a request is
-  aborted, so a retry resumes from the salvaged frontier instead of from root; the engine anchors
-  up to N message boundaries of a conversation automatically
-  (`--max-long-anchors-per-continuation`) on a grid that widens geometrically back from the
-  prompt end (`--long-anchor-spacing`, default 1024 tokens), and a full anchor set gives up the
-  anchor whose loss costs the least coverage rather than the deepest one; and a lane publishes with
-  its staged-prefill bookkeeping cleared.
-- **Cost-scaled materialization search budget** — addresses the crux of
-  [Neroued/ninfer#229](https://github.com/Neroued/ninfer/issues/229): the flat 5 ms
-  under-pressure materialization-search budget is not sufficient — it only manages to
-  get through searching about 10 targets before it times out, so valuable completion
-  plans are missed. Implements the solution suggested by Gene0Liu: scale the
-  materialization search budget with the number of targets, subject to a 250 ms cap
-  (which is almost always hit) — an expensive incumbent earns up to the full 250 ms
-  search, a cheap one keeps the 5 ms floor.
-- **Automatic shared-prefix catalog reclaim** — looks to resolve
-  [Neroued/ninfer#251](https://github.com/Neroued/ninfer/issues/251): the shared
-  stable-prefix catalog saturated and did not evict its least-recently-used entries —
-  with no eviction path for automatic-evidence traffic, once every
-  `--max-shared-prefixes` slot was resident, later automatic candidates were dropped and
-  their shared-prefix reuse froze until an engine restart. Implements the solution
-  suggested by albertov: reclaim the least-recently-used eligible automatic entry (oldest latest
-  hit or publication) when a candidate finds no vacant slot, and count reclaimable slots as
-  publication slack so the materialization selection stops discarding automatic candidates at
-  saturation. The entry is offered to capture planning as a reclaimable slot and released only
-  when the scenario publishing into it is the one selected, so a capture that cannot plan never
-  costs a resident prefix.
-- **Lease and resolved-capacity observability** — the `--request-log-jsonl` occupancy record reports
-  the unmaterialised part of the Device KV lease separately from `allocated + reserved` pages, so a
-  leased-but-unwritten pool is visible as a lease rather than indistinguishable from real KV, and
-  the `server_start` memory ledger reports the Host tier's *resolved* slot counts with both unit
-  costs and the derived budget split, not the requested ones.
-
-Measured net effect on a replay of the traffic that motivated this — 26 multi-turn tool-agent
-requests, `--host-cache-mib 40000`, Qwen3.8-27B NVFP4 + DFlash2, `--max-concurrency 2`, RTX 5090:
-token-level prefix reuse 90.75 % overall and 98.08 % once warm, against 1.44 % across the
-chronic production window the replay was built from; private owners fully evicted dropped from 179
-to 2–3 and clear-all fallbacks from 55 to 0–1, with no mid-conversation root fallback anywhere. The
-replay runs 3.7 minutes, so it demonstrates the mechanism rather than hours-long saturation
-behaviour.
 
 **Features**
 
