@@ -1073,6 +1073,7 @@ public:
         if (publication.session && active.update_session_index) {
             if (!publish_session(*publication.session, active.publication_slot, publication.id,
                                  publication.revision, active.publication_order)) {
+                rank_superseded_publication(publication, *publication.session);
                 publication.session.reset();
             }
         }
@@ -1152,6 +1153,7 @@ public:
         if (publication.session && active.update_session_index) {
             if (!publish_session(*publication.session, active.publication_slot, publication.id,
                                  publication.revision, active.publication_order)) {
+                rank_superseded_publication(publication, *publication.session);
                 publication.session.reset();
                 publication.retention = RetentionClass::RecentPrivate;
             }
@@ -3633,6 +3635,23 @@ private:
             demote_replaced_session(*previous, slot, owner_id);
         }
         return true;
+    }
+
+    // A turn that finishes after a later-submitted turn of its session already holds the session
+    // binding is a stale branch: publishing last does not make it the conversation's future. It
+    // ranks just below the binding that superseded it, so pressure takes it first
+    // instead of the session's current continuation.
+    void rank_superseded_publication(CatalogEntry& publication,
+                                     const CacheSessionKey& key) noexcept {
+        const std::optional<std::size_t> cell = find_session_cell(key);
+        if (!cell) { return; }
+        const SessionIndexEntry& binding = session_index_[*cell];
+        if (binding.slot >= catalog_count_) { return; }
+        const CatalogEntry& bound = catalog_[binding.slot];
+        if (bound.state != CatalogState::Catalogued || bound.id != binding.owner_id) { return; }
+        const std::uint64_t superseding = owner_recency_epoch(bound);
+        publication.last_touch_epoch    = std::min(publication.last_touch_epoch,
+                                                   superseding == 0 ? 0 : superseding - 1U);
     }
 
     void demote_replaced_session(const SessionIndexEntry& previous, std::uint32_t replacement_slot,

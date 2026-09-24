@@ -1446,8 +1446,16 @@ void ProgramImpl::ensure_sequence_kv_lease(SequenceState& sequence, std::uint32_
     const std::uint32_t text_pages = text_kv_addresses->entitlement(sequence.kv->text);
     const std::uint32_t backend_pages =
         sequence.kv->backend ? backend_kv_addresses->entitlement(*sequence.kv->backend) : 0U;
-    const bool main_thin = kv_pages_for_tokens(main_tokens) + cushion > text_pages;
+    // The most a lease can use: every frontier up to the request's ceiling plus the drafts a
+    // round may still verify past it. A lease that holds this needs no cushion beyond it, so a
+    // full pool near the ceiling is not mistaken for a shortfall that ends the answer early.
+    const std::uint32_t backend_ceiling = std::min(
+        capacity, request.lease_ceiling + kv_lease_backend_allowance_tokens());
+    const std::uint32_t reach = kv_pages_for_tokens(backend_ceiling);
+    const bool main_thin =
+        text_pages < reach && kv_pages_for_tokens(main_tokens) + cushion > text_pages;
     const bool backend_thin = sequence.kv->backend.has_value() && backend_tokens != 0 &&
+                              backend_pages < reach &&
                               kv_pages_for_tokens(backend_tokens) + cushion > backend_pages;
     if (!main_thin && !backend_thin) { return; }
 
@@ -1456,11 +1464,9 @@ void ProgramImpl::ensure_sequence_kv_lease(SequenceState& sequence, std::uint32_
     // otherwise overshoot the context limit), so the reservation can only fail on space.
     // The ladder ends at one page group: a pool that can only spare its own allocation
     // granularity would otherwise settle with free page groups that no coarser rung can use.
-    const auto target = [](std::uint32_t cap, std::uint32_t pages, std::uint32_t wanted) {
-        return std::min(cap, std::max(pages, wanted));
+    const auto target = [reach](std::uint32_t cap, std::uint32_t pages, std::uint32_t wanted) {
+        return std::min(cap, std::max(pages, std::min(reach, wanted)));
     };
-    const std::uint32_t backend_ceiling = std::min(
-        capacity, request.lease_ceiling + kv_lease_backend_allowance_tokens());
     const auto targets = [&](std::uint32_t extra_tokens) {
         return DeviceKVPages{
             .main = target(std::min(text_kv_pages->physical_pool().capacity_pages(),

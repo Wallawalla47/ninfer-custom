@@ -1,5 +1,7 @@
 #include "ninfer/engine.h"
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -366,12 +368,31 @@ ninfer::PromptInput agent_prompt(std::string system, std::vector<std::string> to
 }
 
 int exercise_registered_frontend(const ninfer::Engine& engine) {
-    if (engine.count_tokens(chinese_chat(true)) != 16) {
-        std::cerr << "registered tokenizer/chat template changed the thinking prompt golden\n";
-        return 1;
-    }
-    if (engine.count_tokens(chinese_chat(false)) != 18) {
-        std::cerr << "registered tokenizer/chat template changed the no-thinking prompt golden\n";
+    // Goldens belong to the chat template, which each model generation registers: Qwen3.8 adds a
+    // reasoning-effort instruction to every thinking prompt.
+    struct PromptGolden {
+        std::string_view model_prefix;
+        std::uint32_t thinking    = 0;
+        std::uint32_t no_thinking = 0;
+    };
+    constexpr std::array goldens{
+        PromptGolden{.model_prefix = "qwen3.6", .thinking = 16, .no_thinking = 18},
+        PromptGolden{.model_prefix = "qwen3.8", .thinking = 58, .no_thinking = 18},
+    };
+    const std::string model         = engine.model_metadata().model_id;
+    const std::uint32_t thinking    = engine.count_tokens(chinese_chat(true));
+    const std::uint32_t no_thinking = engine.count_tokens(chinese_chat(false));
+    const auto golden = std::find_if(goldens.begin(), goldens.end(), [&](const PromptGolden& g) {
+        return model.starts_with(g.model_prefix);
+    });
+    if (golden == goldens.end() || thinking != golden->thinking ||
+        no_thinking != golden->no_thinking) {
+        std::cerr << "registered tokenizer/chat template changed the prompt goldens for " << model
+                  << ": thinking " << thinking << ", no-thinking " << no_thinking << " tokens";
+        if (golden != goldens.end()) {
+            std::cerr << ", expected " << golden->thinking << " and " << golden->no_thinking;
+        }
+        std::cerr << '\n';
         return 1;
     }
     return 0;
@@ -920,10 +941,13 @@ int exercise_shared_saturation_reclaim(const char* artifact) {
 
 int exercise_anthropic_prefix_regression(const char* artifact) {
     ninfer::Engine engine(anthropic_prefix_regression_engine_options(artifact));
+    // The default catalog holds every shared candidate one request can prepare: the explicit
+    // markers plus the Engine-automatic tool, instruction and full-prompt candidates.
     if (!engine.options().context_cache.max_shared_prefixes ||
         *engine.options().context_cache.max_shared_prefixes !=
-            ninfer::kMaximumExplicitPromptCacheMarkers) {
-        std::cerr << "single-concurrency Engine did not expose four default shared prefixes\n";
+            ninfer::kMaximumPreparedPromptCacheCandidatesPerRequest) {
+        std::cerr << "single-concurrency Engine did not size its default shared catalog for one "
+                     "request's full candidate set\n";
         return 1;
     }
 

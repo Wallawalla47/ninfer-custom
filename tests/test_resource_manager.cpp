@@ -4338,6 +4338,25 @@ void test_lease_reclaim_releases_least_recent_idle_owners() {
             "a reclaimed owner was still offered for reuse");
 }
 
+// Two turns of one session run concurrently and the later-submitted one finishes first, so it
+// holds the session binding. The earlier turn publishing afterwards is a stale branch: finishing
+// last must not make it outrank the session's current continuation under pressure.
+void test_superseded_session_turn_ranks_below_its_binding() {
+    FakeManager manager = make_manager(2, 4);
+    FakeProgram program;
+    const FakeCacheSessionKey session{7};
+    const ActiveRequest older = start_active(
+        manager, program, 91, make_base(91, session, RetentionClass::LiveSession), 1);
+    const ActiveRequest newer = start_active(
+        manager, program, 92, make_base(92, session, RetentionClass::LiveSession), 2);
+    (void)finish_active(manager, program, newer);
+    (void)finish_active(manager, program, older);
+
+    require(manager.reclaim_device_kv_for_lease(program, 1, 0) == 1 &&
+                program.released_continuation_keys == std::vector<std::uint32_t>{91},
+            "a stale session turn outranked the session's current binding");
+}
+
 void test_automatic_reclaim_picks_the_least_recently_used_entry() {
     FakeManager manager = make_manager(1, 4, 2);
     FakeProgram program;
@@ -4501,6 +4520,8 @@ int main() {
              test_automatic_reclaim_picks_the_least_recently_used_entry);
     run_test("lease reclaim releases least recent idle owners",
              test_lease_reclaim_releases_least_recent_idle_owners);
+    run_test("superseded session turn ranks below its binding",
+             test_superseded_session_turn_ranks_below_its_binding);
     run_test("automatic reclaim waits for a planned capture",
              test_automatic_reclaim_waits_for_a_planned_capture);
     run_test("escape hatch clears all when nothing fits",
