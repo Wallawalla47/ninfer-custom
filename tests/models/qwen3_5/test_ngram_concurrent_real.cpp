@@ -232,15 +232,18 @@ int main(int argc, char** argv) {
         // Part 3b: a copy lane and a free-form lane in flight together, so ngram rounds carry a
         // row without a copy proposal. The copy lane must stay an exact source prefix. With a
         // masked drafter the free-form row keeps its neural proposal in those rounds instead of
-        // decoding one token: only a final budget-limited round may verify no draft. Both lanes
-        // run without prefix reuse, like the free-form pair, so the scenario isolates mixed rounds.
+        // decoding one token: only a final budget-limited round may verify no draft. The copy lane
+        // offers its rewrite-checkpoint capture under the state pressure left by the cached
+        // continuations above, and the free-form lane is admitted during its prefill. Whether that
+        // capture commits or is skipped, the copy lane's later prefill steps must address its own
+        // KV row rather than the row the other lane's staging bound last.
         {
             const int seed_a            = 300;
             const std::string source_a  = make_source(seed_a);
             const std::string freeform =
                 "Explain in four short sentences how a hash table resolves collisions.";
             auto handle_a = engine.submit(engine.prepare(copy_prompt(source_a, seed_a)),
-                                          request(256, false));
+                                          request(256, true));
             auto handle_b = engine.submit(engine.prepare(freeform_prompt(freeform)),
                                           request(192, false));
             const auto result_a = handle_a.wait();
