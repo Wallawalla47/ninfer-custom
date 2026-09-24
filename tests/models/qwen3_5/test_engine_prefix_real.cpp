@@ -649,12 +649,16 @@ int exercise_host_restore(const char* artifact) {
         return 1;
     }
 
+    // The client edits the retained reply, so the next prompt diverges inside the assistant turn
+    // and only the turn-closure checkpoint can resume it. Whether an unedited reply re-renders
+    // byte-identically (making the longer endpoint reusable instead) depends on the chat template.
     ninfer::PromptInput continuation = retained_input();
     ninfer::ChatMessage assistant;
     assistant.role              = ninfer::ChatRole::Assistant;
     assistant.reasoning_content = retained.reasoning;
-    assistant.parts.push_back(ninfer::MessagePart{
-        .kind = ninfer::MessagePartKind::Text, .text = retained.content, .media = {}});
+    assistant.parts.push_back(ninfer::MessagePart{.kind  = ninfer::MessagePartKind::Text,
+                                                  .text  = "Edited: " + retained.content,
+                                                  .media = {}});
     continuation.messages.push_back(std::move(assistant));
     ninfer::ChatMessage followup;
     followup.role = ninfer::ChatRole::User;
@@ -695,7 +699,13 @@ int exercise_host_restore(const char* artifact) {
                   << " main=" << after_restore.main_kv_h2d_pages
                   << " backend=" << after_restore.backend_kv_h2d_pages
                   << " degraded=" << after_restore.pressure_private_owners_degraded
-                  << " evicted=" << after_restore.pressure_private_owners_evicted << '\n';
+                  << " evicted=" << after_restore.pressure_private_owners_evicted
+                  << " | pressure d2h state=" << after_pressure.state_d2h_count
+                  << " main=" << after_pressure.main_kv_d2h_pages
+                  << " backend=" << after_pressure.backend_kv_d2h_pages
+                  << " | source prompt=" << retained.prompt.prompt_tokens
+                  << " pressure prompt=" << pressure_result.prompt.prompt_tokens
+                  << " restored prompt=" << restored.prompt.prompt_tokens << '\n';
         return 1;
     }
 
@@ -3358,6 +3368,8 @@ int main() {
         result = exercise_vision(engine);
     } else if (scenario == "all") {
         result = exercise_artifact(artifact);
+    } else if (scenario == "host-restore") {
+        result = exercise_host_restore(artifact);
     } else if (scenario == "concurrent") {
         result = exercise_concurrent_resource_settlement(artifact);
     } else if (scenario == "anthropic-prefix-regression") {
