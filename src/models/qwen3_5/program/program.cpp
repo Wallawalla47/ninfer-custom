@@ -501,6 +501,24 @@ std::optional<std::uint32_t> Program::device_kv_lease_settlement_tokens(
     return impl_->device_kv_lease_settlement_tokens(sequence, forced_span_tokens);
 }
 
+std::optional<DeviceKVLeaseShortfall>
+Program::device_kv_lease_shortfall(SequenceHandle sequence) const noexcept {
+    return impl_->device_kv_lease_shortfall(sequence);
+}
+
+bool Program::resume_device_kv_lease(SequenceHandle sequence) noexcept {
+    return impl_->resume_device_kv_lease(sequence);
+}
+
+DeviceKVPages
+Program::retained_device_kv_pages(const ContinuationHandle& continuation) const noexcept {
+    return impl_->retained_device_kv_pages(continuation);
+}
+
+DeviceKVPages Program::retained_device_kv_pages(const SharedPrefixHandle& shared) const noexcept {
+    return impl_->retained_device_kv_pages(shared);
+}
+
 ReleaseResult Program::release_continuation(ContinuationHandle&& continuation) noexcept {
     return impl_->release_continuation(std::move(continuation));
 }

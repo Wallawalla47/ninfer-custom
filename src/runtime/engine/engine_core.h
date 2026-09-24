@@ -1941,14 +1941,40 @@ private:
     }
 
     // A sequence whose Device KV lease can no longer grow finishes at the frontier its lease
-    // covers. Bound its remaining budget now so that finish carries the request's generation
-    // limit reason, instead of the sequence running past its lease and failing a launch.
+    // covers. When the pool ran out of space, retained cache is released first so the answer can
+    // continue; only a lease that still cannot take its smallest step has its remaining budget
+    // bounded, so that finish carries the request's generation limit reason instead of the
+    // sequence running past its lease and failing a launch.
     void apply_device_kv_lease_settlements() {
         for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
             const auto& request = slots_[lane];
             if (request == nullptr || !request->is_decode_ready() || !request->sequence ||
                 !request->budget) {
                 continue;
+            }
+            if (const auto shortfall =
+                    instance_.program->device_kv_lease_shortfall(*request->sequence)) {
+                const std::uint32_t released = resources_.reclaim_device_kv_for_lease(
+                    *instance_.program, shortfall->main_pages, shortfall->backend_pages);
+                if (instance_.program->resume_device_kv_lease(*request->sequence)) {
+                    if (released != 0) {
+                        std::fprintf(stderr,
+                                     "[engine] Device KV lease of lane %u extended: released %u "
+                                     "retained cache owner(s)\n",
+                                     lane, released);
+                    }
+                    continue;
+                }
+                if (!request->lease_shortfall_reported) {
+                    request->lease_shortfall_reported = true;
+                    std::fprintf(stderr,
+                                 "[engine] warning: Device KV lease of lane %u cannot grow after "
+                                 "releasing %u retained cache owner(s); still short %u main / %u "
+                                 "backend pages for its smallest step, so the answer ends early "
+                                 "with output_limit\n",
+                                 lane, released, shortfall->minimum_main_pages,
+                                 shortfall->minimum_backend_pages);
+                }
             }
             const std::uint32_t control = request->output.control_suffix_tokens();
             const std::optional<std::uint32_t> limit =

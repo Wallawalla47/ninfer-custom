@@ -435,6 +435,11 @@ struct RequestControl {
     // frontier its lease covers with its generation limit reason instead of failing a launch on
     // coverage.
     bool lease_settled = false;
+    // A settlement caused by pool space rather than the output ceiling, and the entitlements its
+    // full and smallest growth steps asked for: retained cache may give those pages back.
+    bool lease_space_limited = false;
+    DeviceKVPages lease_full_target;
+    DeviceKVPages lease_minimum_target;
 
     struct Prefill {
         PreparedPromptData prompt;
@@ -586,6 +591,13 @@ public:
     [[nodiscard]] std::optional<std::uint32_t>
     device_kv_lease_settlement_tokens(SequenceHandle sequence,
                                       std::uint32_t forced_span_tokens) const noexcept;
+    [[nodiscard]] std::optional<DeviceKVLeaseShortfall>
+    device_kv_lease_shortfall(SequenceHandle sequence) const noexcept;
+    [[nodiscard]] bool resume_device_kv_lease(SequenceHandle sequence) noexcept;
+    [[nodiscard]] DeviceKVPages
+    retained_device_kv_pages(const ContinuationHandle& continuation) const noexcept;
+    [[nodiscard]] DeviceKVPages
+    retained_device_kv_pages(const SharedPrefixHandle& shared) const noexcept;
 
     [[nodiscard]] MemorySummary memory_summary() const noexcept;
 

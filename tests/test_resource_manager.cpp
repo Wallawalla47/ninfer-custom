@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -1179,9 +1180,29 @@ public:
         return result;
     }
 
+    struct FakeDeviceKVPages {
+        std::uint32_t main    = 0;
+        std::uint32_t backend = 0;
+    };
+
+    // Device pages a retained owner would free; every owner holds one main page unless a test
+    // says otherwise (a Host-only owner frees none).
+    [[nodiscard]] FakeDeviceKVPages
+    retained_device_kv_pages(const FakeContinuationHandle& continuation) const noexcept {
+        const auto found = retained_kv_pages.find(continuation.content_key);
+        return found == retained_kv_pages.end() ? FakeDeviceKVPages{.main = 1} : found->second;
+    }
+
+    [[nodiscard]] FakeDeviceKVPages
+    retained_device_kv_pages(const FakeSharedPrefixHandle& shared) const noexcept {
+        const auto found = retained_kv_pages.find(shared.content_key);
+        return found == retained_kv_pages.end() ? FakeDeviceKVPages{.main = 1} : found->second;
+    }
+
     [[nodiscard]] FakeReleaseResult
     release_continuation(FakeContinuationHandle&& continuation) noexcept {
         released_continuations.push_back(continuation.id);
+        released_continuation_keys.push_back(continuation.content_key);
         advance_revision();
         return FakeReleaseResult{.status = ConsumeStatus::Consumed};
     }
@@ -1265,6 +1286,8 @@ public:
     std::vector<std::uint64_t> started_action_ids;
     std::vector<std::uint32_t> selected_shared_capture_frontiers;
     std::vector<std::uint32_t> released_continuations;
+    std::vector<std::uint32_t> released_continuation_keys;
+    std::map<std::uint32_t, FakeDeviceKVPages> retained_kv_pages;
     std::vector<std::uint32_t> released_shared_prefix_keys;
 
 private:
@@ -4290,6 +4313,31 @@ void test_full_anchor_set_replaces_the_least_coverage_anchor() {
             "full anchor set did not give up the anchor whose loss costs the least coverage");
 }
 
+// A running answer whose Device KV lease ran out of pool space takes pages back from retained
+// cache: least recently used idle owners first, never an owner that frees no Device page.
+void test_lease_reclaim_releases_least_recent_idle_owners() {
+    FakeManager manager = make_manager(1, 4);
+    FakeProgram program;
+    for (std::uint32_t key : {81U, 82U, 83U}) {
+        const ActiveRequest request = start_active(manager, program, key, make_base(key), key);
+        (void)finish_active(manager, program, request);
+    }
+    program.retained_kv_pages[82] = {};
+
+    require(manager.reclaim_device_kv_for_lease(program, 1, 0) == 1 &&
+                program.released_continuation_keys == std::vector<std::uint32_t>{81},
+            "lease reclaim did not release only the least recently used owner");
+    require(manager.reclaim_device_kv_for_lease(program, 2, 0) == 1 &&
+                program.released_continuation_keys == std::vector<std::uint32_t>{81, 83},
+            "lease reclaim released an owner that frees no Device page");
+    require(manager.reclaim_device_kv_for_lease(program, 1, 0) == 0,
+            "lease reclaim released an owner with no Device page to give back");
+    auto inspection = manager.inspect(program, FakePreparedPrompt{81}, make_base(81), 90);
+    require(inspection.choice.has_value() &&
+                inspection.choice->summary().reusable_prompt_tokens == 0,
+            "a reclaimed owner was still offered for reuse");
+}
+
 void test_automatic_reclaim_picks_the_least_recently_used_entry() {
     FakeManager manager = make_manager(1, 4, 2);
     FakeProgram program;
@@ -4451,6 +4499,8 @@ int main() {
              test_full_anchor_set_replaces_the_least_coverage_anchor);
     run_test("automatic reclaim picks the least recently used entry",
              test_automatic_reclaim_picks_the_least_recently_used_entry);
+    run_test("lease reclaim releases least recent idle owners",
+             test_lease_reclaim_releases_least_recent_idle_owners);
     run_test("automatic reclaim waits for a planned capture",
              test_automatic_reclaim_waits_for_a_planned_capture);
     run_test("escape hatch clears all when nothing fits",
