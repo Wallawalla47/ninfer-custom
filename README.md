@@ -1,61 +1,69 @@
 # NInfer — local fork
 
-> **AI disclaimer:** Everything added to this fork — the local features and this README
-> included — has been written with AI (mostly Qwen3.8-27B running on NInfer, with a few
-> other AI systems as well), so it is likely to be neither complete nor entirely
-> accurate. This is simply hobby development.
+> **AI disclaimer:** Everything added to this fork, including this README, was written with AI
+> (mostly Qwen3.8-27B running on NInfer, plus a few other AI systems). It is likely to be
+> neither complete nor entirely accurate. This is hobby development.
 
-This repository is a personal fork of [Neroued/ninfer](https://github.com/Neroued/ninfer),
-maintained on the branch `master`. It tracks upstream while adding
-local features on top. This section summarises, in high terms, everything merged in from
-other sources and everything built locally; the upstream README follows, unmodified, below
-the "Upstream README" heading.
+This is a personal fork of [Neroued/ninfer](https://github.com/Neroued/ninfer), kept on the
+`master` branch. It follows upstream closely and adds changes on top. The sections below explain
+what is different, grouped by topic, with credit given where a change came from someone else. The
+upstream README follows, copied unchanged, under the "Upstream README" heading.
 
-## Inference performance: this fork vs upstream (A/B benchmark)
+**The short version.** Compared with upstream, this fork:
 
-Both arms serve the same official NInfer Qwen3.8-27B NVFP4 artifact
-(`qwen3_8_27b_nvfp4-official.ninfer`) on a NVIDIA GeForce RTX 5090, run at the same
-max-context (180000 — the largest context at which the upstream arm starts on this card;
-see below) and replay the same synthesized agentic workload: 14 requests shaped from
-the production request log (multi-turn tool-agent sessions, ~82,000-token shared prefix,
-median prompt ≈ 121K tokens, two concurrent-request pairs including a shared-prefix
-cache-contention pair, max-concurrency 2).
+- reuses cached prompt prefixes far more often in long multi-turn agent sessions, which roughly
+  halves time-to-first-token on that kind of workload;
+- has an optional faster prefill kernel for long prompts (`--fast-prefill-kernel`);
+- lets ngram copy drafting run with more than one concurrent request;
+- accepts more tool-call formats and API options used by agent clients such as Claude Code, Qwen
+  Code, Codex and Zed;
+- builds and runs natively on Windows;
+- recovers from out-of-memory and planner errors instead of stopping the whole engine.
 
-| Metric | Upstream + Windows port | This NInfer-custom fork | Δ |
+## Performance: this fork vs upstream
+
+Both builds served the same model on the same GPU and replayed the same agent-style workload:
+
+- **Model and GPU:** the official NInfer Qwen3.8-27B NVFP4 artifact
+  (`qwen3_8_27b_nvfp4-official.ninfer`) on an NVIDIA GeForce RTX 5090.
+- **Context:** `--max-context 180000` for both, the largest context upstream can start with on
+  this card (see the note below the launch parameters).
+- **Workload:** 14 requests modelled on a real request log. They are multi-turn tool-agent
+  sessions sharing an ~82,000-token prefix, with a median prompt of about 121K tokens, including
+  two pairs of concurrent requests (one pair competing for the same cached prefix).
+  `--max-concurrency 2`, seed 42.
+
+| Metric | Upstream + Windows port | This fork | Change |
 |---|---|---|---|
-| Avg TTFT (s, lower better) | 28.1 | 14.6 | -48.1% |
-| TTFT median (s, lower better) | 25.9 | 11.3 | -56.6% |
-| Prefix-cache hit rate (hit/prompt tokens) | 19.8% | 66.3% | +46.5 pp |
-| Total cache-hit tokens (of 1,649,215 prompt) | 326,780 | 1,093,256 | +234.6% |
-| Prefill tok/s, cold (root) requests, median | 4,159 | 4,220 | +1.5% |
-| Output tok/s | 173 | 181 | +4.6% |
+| Average time to first token (s, lower is better) | 28.1 | 14.6 | −48.1 % |
+| Median time to first token (s, lower is better) | 25.9 | 11.3 | −56.6 % |
+| Prompt tokens served from cache | 19.8 % | 66.3 % | +46.5 points |
+| Cached tokens (of 1,649,215 prompt tokens) | 326,780 | 1,093,256 | +234.6 % |
+| Prefill tok/s on requests with no cache hit (median) | 4,159 | 4,220 | +1.5 % |
+| Output tok/s | 173 | 181 | +4.6 % |
 
-- Avg/median TTFT over all 14 completed requests per arm.
-- Cold (root) prefill = requests that did a full uncached prefill (n: upstream 11, fork 2).
-- Output tok/s = total completion tokens / total decode wall time (completion tokens:
-  upstream 12,639, fork 6,543; thinking on for both arms; per-request decode rates are
-  comparable — see the per-request tables in the full report).
-- Cache hits by reuse path (requests / hit tokens):
+How to read it:
 
-  | Path | Upstream | This NInfer-custom fork |
+- Time to first token is averaged over all 14 requests.
+- "No cache hit" requests are those that had to prefill the whole prompt (upstream 11, fork 2).
+- Output tok/s is total completion tokens divided by total decode time. Thinking was on for both.
+  Upstream produced more tokens (12,639 against 6,543), but per-request decode rates are similar.
+- Where the cache hits came from (requests / cached tokens):
+
+  | Reuse path | Upstream | This fork |
   |---|---|---|
-  | private_long_anchor | 0 / 0 | 9 / 766,476 |
-  | private_response_replay | 3 / 326,780 | 3 / 326,780 |
-  | root | 11 / 0 | 2 / 0 |
+  | Long anchor inside a private conversation | 0 / 0 | 9 / 766,476 |
+  | Replay of the previous response | 3 / 326,780 | 3 / 326,780 |
+  | No reuse (full prefill) | 11 / 0 | 2 / 0 |
 
-**Workload note.** This was tested on what is designed to be a fairly representative
-agentic workload (the synthetic sessions described above). If the workload includes
-more copying work, the ngram-based drafting implementation
-(`--ngram-draft-tokens` / `--ngram-min-match`) would boost output tok/s further.
+Almost all of the gain comes from the prefix-cache changes described under
+[Prefix caching and KV memory](#prefix-caching-and-kv-memory). A workload with more copying would
+also gain output speed from ngram drafting (`--ngram-draft-tokens` / `--ngram-min-match`).
 
-**Configuration and launch parameters.** Model: the official NInfer Qwen3.8-27B NVFP4
-artifact `qwen3_8_27b_nvfp4-official.ninfer`; GPU: NVIDIA GeForce RTX 5090; max-context
-180000 for both arms; max-concurrency 2; `--kv-dtype int8`. This run predates the retention
-changes summarised under **Prefix caching** below, so the fork-arm figures describe that
-earlier tree — its launch list is the pre-budget component form of the cache flags, kept here
-as the record of what was measured.
+This run predates `--host-cache-mib` and `--fast-prefill-kernel`, so the fork used the older
+separate cache flags shown below. The launch lists are kept as the record of what was measured.
 
-Launch parameters, this fork (all flags):
+Launch parameters, this fork:
 
 ```text
 --host 127.0.0.1 --port 8080 --max-context 180000 --max-concurrency 2 --spec dflash2
@@ -70,10 +78,10 @@ Launch parameters, this fork (all flags):
 thinking now. Time to act:"
 ```
 
-Launch parameters, upstream + Windows port (same list minus the fork-only flags it does
-not support, which are dropped: `--ngram-draft-tokens`, `--ngram-min-match`,
-`--kv-headroom-mib`, `--log-colours`, `--ngram-archive-mib`, `--ngram-session-mib`,
-`--ngram-native-sessions`, `--cuda-graph-allowance-mib`, `--thinking-budget-message`):
+Launch parameters, upstream + Windows port (the same list without the fork-only flags
+`--ngram-draft-tokens`, `--ngram-min-match`, `--kv-headroom-mib`, `--log-colours`,
+`--ngram-archive-mib`, `--ngram-session-mib`, `--ngram-native-sessions`,
+`--cuda-graph-allowance-mib` and `--thinking-budget-message`):
 
 ```text
 --host 127.0.0.1 --port 8080 --max-context 180000 --max-concurrency 2 --spec dflash2
@@ -84,416 +92,298 @@ not support, which are dropped: `--ngram-draft-tokens`, `--ngram-min-match`,
 --default-thinking-budget 16384
 ```
 
-The upstream serve bakes an automatic 1 GiB KV headroom into `--kv-capacity auto` that
-has no flag to lower (the fork's `--kv-headroom-mib 0`), so it cannot start at the
-production max-context 220000 on this 32 GiB card; both arms therefore run at the same
-calibrated 180000 so the arms stay comparable. Thinking is on for both arms
-(`--default-thinking-budget 16384` + `--preserve-thinking`; both upstream-supported).
+Why 180000: upstream always keeps 1 GiB of GPU memory spare when sizing the KV cache
+automatically, and has no flag to lower it (the fork's `--kv-headroom-mib 0`). On a 32 GiB card
+that stops upstream from starting at the 220000 context used in production, so both builds ran at
+180000 to keep the comparison fair.
 
-Workload: 14 requests, seed 42; groups replayed in order, requests within a group sent
-concurrently. The full A/B rig — workload generator, runner, watchdog and control build
-driver — lives in [`bench/ab/`](bench/ab/README.md) so the test can be replicated with
-your own builds and flags.
+The complete test rig (workload generator, runner, watchdog and control-build driver) is in
+[`bench/ab/`](bench/ab/README.md), so you can repeat the test with your own builds and flags.
 
-## Merged from upstream and other sources
+## What this fork changes
 
-**Upstream pull requests** (`Neroued/ninfer`):
+Each topic below lists everything that affects it, whether written here or taken from elsewhere.
+"Upstream PR" means an open pull request on `Neroued/ninfer` that this fork has merged before
+upstream has.
 
-- **PR #162** — llama.cpp-compatible model metadata on `/v1/models` (`n_vocab`, `n_ctx`,
-  `n_ctx_train`, `n_embd`, `n_params`, `size`, `ftype`), by
-  [Hector Ramon Jimenez (hecrj)](https://github.com/hecrj). Re-implemented against the v3
-  `src/models` layout, which replaced the `src/targets` layout the PR was written for.
-- **PR #197** — honour `ignore_eos` on chat completions, by
-  [Thireus](https://github.com/Thireus).
-- **PR #264** — take a partial last M tile in the fused SwiGLU TMA route, by Michael
-  Dementii.
-- **PR #268** — fold the sigmoid gate into the causal reduce epilogue, by Michael
-  Dementii.
-- **PR #273** — register the text profile of `rmsnorm_rope` and route to it, by Michael
-  Dementii.
-- **PR #281** — correct the Q5 parent-shape explanations and route table, by
-  [Minnnn](https://github.com/Minnnn).
-- **PR #282** — read GGUF (any ggml quantisation level) as a conversion source, by
-  [giveen](https://github.com/giveen).
-- **PR #284** — tune the Q6 34,816×5120 dispatch and report the curve, by
-  [bingchengcc](https://github.com/bingchengcc).
-- **PR #292** — ladder the Q5 linear K-split capacity to the token count, by
-  [giveen](https://github.com/giveen).
-- **PR #295** — accept `reasoning.summary` and `include: ["reasoning.encrypted_content"]`
-  in OpenAI Responses API requests, unblocking harnesses such as Codex and Zed Agent, by
-  [Macasacker](https://github.com/Macasacker), rebasing
-  [Sha1rholder](https://github.com/Sha1rholder)'s original PR #148. The PR's new test
-  assertions were adapted locally to compare JSON objects order-independently, because
-  `RequestJson` is an `ordered_json` whose object equality is insertion-order sensitive.
-- **PR #299** — keep the last value on a duplicate tool-call parameter (JSON object
-  semantics) instead of falling back to text, with the repair counted as
-  `duplicate_parameters_repaired` in the parse diagnostics and a short markup snippet
-  logged when a fallback does occur, by [adubkov](https://github.com/adubkov).
-- **PR #300 (tool-call parsing)** — recognise the XML tool-call forms emitted by Claude Code and
-  other agent harnesses: `<function name="…">` attribute names, `<invoke>`, `<function_calls>`
-  containers, and the `<param>`/`</parameter>` short aliases, with attribute-token-boundary name
-  lookup, matching opening/closing tag pairs, and a streaming decoder that sees every variant
-  rather than only `<tool_call>`. Resolves upstream issue
-  [#276](https://github.com/Neroued/ninfer/issues/276), by
-  [pkochubey](https://github.com/pkochubey). The PR's conflicting-duplicate rejection was adapted
-  to the last-value-wins rule from PR #299 above.
-- **PR #300 (`response_format`)** — accept `{"type":"json_object"}` and `{"type":"json_schema"}` on
-  chat completions instead of refusing everything but `{"type":"text"}`, so harnesses that always
-  send a response format (Hermes-style clients among them) are not rejected, by
-  [pkochubey](https://github.com/pkochubey). The type is not enforced: NInfer still has no
-  constrained decoding, and `docs/serving.md` states that rather than claiming the schema is
-  honoured.
-- **PR #300 (truncation stop reasons)** — report a truncated answer as truncated rather than as a
-  completed tool call: `length` on chat completions and `max_tokens` /
-  `model_context_window_exceeded` on Messages now win over `tool_calls` / `tool_use` when the
-  output limit or context capacity cut the call short, by
-  [pkochubey](https://github.com/pkochubey). A client that trusts the terminal reason would
-  otherwise act on a call whose arguments may be incomplete. The partial call is still streamed.
-- **PR #300 (assistant prefill)** — accept a trailing assistant message as an assistant-prefill
-  continuation on chat completions as well as Messages, and allow that final turn to carry
-  reasoning content or tool calls, by [pkochubey](https://github.com/pkochubey). This lets an
-  agent client hand back an output-limited partial assistant turn and have the Engine continue it
-  in place. Thinking-enabled prefill stays refused, unlike the PR: the template places the
-  continued content inside an ambiguous reasoning opener, which `test_assistant_continuation`
-  pins, so only the PR's reasoning/tool-call relaxation is taken here.
-- **PR #300 (unreachable checkpoints)** — exclude a checkpoint the incoming request cannot reach
-  from the portfolio recovery-loss accounting, so the planner stops crediting an owner for a
-  prefix hit that request could never take, by [pkochubey](https://github.com/pkochubey).
-  Resolves upstream issue [#178](https://github.com/Neroued/ninfer/issues/178). The fork later narrowed
-  it: only a checkpoint its own session has moved past loses its value (see **Prefix caching**
-  below).
+### Prefix caching and KV memory
 
-- **PR #309** — keep quoted reasoning closes and later tool-call markers, by Fedor Suchkov.
-  The output session used to close the reasoning channel at the first literal `</think>` in the
-  generated bytes, so a model reasoning about chat templates (quoting the marker) had the rest of
-  its thinking published as content, which clients such as Qwen Code reject as leaked thinking
-  tags. A close now needs a boundary after the marker, and the tool-call parser tries later
-  `<tool_call>` wrappers when an earlier, quoted one does not parse. Adapted locally in two ways:
-  - **Line-break boundary:** only a line break confirms a close (the model's serialization is
-    `\n</think>\n\n`). The PR also accepted a space, and a live check still leaked on
-    "the `</think>` tag".
-  - **Marker forms:** retries walk only `<tool_call>` wrappers, with this fork's other marker
-    forms, tolerant truncated-tail recovery and PR #299 duplicate repair kept. Walking every form
-    would re-read a truncated call through its own nested `<function=...>`.
-
-Recurring merges from upstream `master` additionally bring in ongoing kernel and build
-work: NVFP4/Q8/sparse-MoE dispatch tuning, whole-tile W4A4 TMA scale routing, the real
-Jinja chat-template interpreter (`third_party/llama-jinja`), state-cache benchmark
-fixtures, and the per-component CMake reorganisation.
-
-**Other sources:**
-
-- **Ngram copy drafting (the original C=1 implementation)** — from the
-  [remesis/ninfer](https://github.com/remesis/ninfer) fork, by
-  [remesis](https://github.com/remesis): exact-checked CPU copy proposals alongside
-  MTP/DFlash/DFlash2 with optional bounded session retention (upstream issue
-  [Neroued/ninfer#234](https://github.com/Neroued/ninfer/issues/234)), cherry-picked from
-  remesis's branch. The C=1 implementation is remesis's original work; this fork's
-  contribution is the extension to C>1 concurrency (below).
-- **Vision overlay residency (RAM offload of the vision tower)** — original work by
-  [Valeriy Selitskiy (iamwavecut)](https://github.com/iamwavecut), from the
-  previous-generation tree's PR #73 ("content-addressed KV host cache + vision overlay
-  residency"): the overlay port, 35B support, and the residency flags. Re-implemented for
-  this V3 engine as `--vision-residency overlay` (local re-implementation, below).
-- **Tolerant tool-call recovery (`--tolerant-tool-calls`)** — original design and
-  implementation by [David Oelfke (gzenz)](https://github.com/gzenz) in the
-  [gzenz/ninfer](https://github.com/gzenz/ninfer) fork (September 2026), commits
-  `b2267e06` ("add --tolerant-tool-calls to recover complete Qwen calls with malformed
-  wrapper or suffix output"), `0ce6e3f6` ("recover a single truncated final call in tolerant
-  mode when closing tags are cut off at region end"), `0f3c9f55` ("recover function name
-  in tolerant mode when the closing '>' is omitted before a parameter tag"), `38709834`
-  ("keep a value cut by the output budget, and keep a truncated final call only when at
-  least one parameter is complete — otherwise the region stays text, with the operational
-  record guarded to match"), and `44f2c9c3` ("keep complete calls whose name is not in the
-  declared tools"). gzenz's version
-  sits on a divergent canonical parser, so the recovery logic was **ported** onto this fork's
-  multi-marker parser (PR #300's marker recognition and PR #299's last-value-wins duplicate
-  handling are preserved): in tolerant mode, a complete call followed by a trailing suffix or
-  a malformed second call keeps the good call with the tail discarded (`truncated_tail`
-  diagnostic, logged at Info severity), a single final call cut at the region end by the
-  output budget is kept with its partial value, a missing closing bracket after the function
-  name is recovered by an identifier-run scan, and undeclared tool names stay structured. The
-  strict parser — the default — is unchanged.
-- **Materialization seal-window atomicity** — original fix by
-  [Gideon Zenz (gzenz)](https://github.com/gzenz) in the
-  [gzenz/ninfer](https://github.com/gzenz/ninfer) fork (September 2026), commit
-  `c53e025c` ("fix(planner): make materialization seal atomic via a seal-window claim"):
-  the materialization assess-to-seal window raced on a victim's continuation slot
-  generation — a concurrent demote bumped it, so the seal's revalidation saw stale
-  policy state and the planner's throw propagated to the Engine worker's last-resort
-  handler, failing the whole instance. An atomic claim (compare-and-swap with bounded
-  backoff) now serializes the window, and a lost claim or failed seal falls back to the
-  root-maximal eviction target so the request re-prefills instead of failing admission.
-  The commit's unrelated search-budget tuning and debug instrumentation were not taken;
-  the tolerant-parser tweak it bundled is already covered by the multi-marker recovery
-  above.
-- **Split-KV page-limit floor (small-t split safety)** — original fix by
-  [Gideon Zenz (gzenz)](https://github.com/gzenz) in the
-  [gzenz/ninfer](https://github.com/gzenz/ninfer) fork (September 2026), commit
-  `7a876cf7` ("fix(attn): floor split-KV split count by page limit to prevent shared-memory
-  OOB at large context windows"): for the `SmallTSplitScale == 1` geometry, each split
-  stages at most 64 physical-page IDs into `__shared__ physical_pages_s[64]`, so the
-  number of splits must keep keys-per-split within one page table; the old code clamped
-  splits to `SmallTMaximumSplits`, which under-provisioned at (YaRN-extended) large
-  windows and overflowed shared memory. The split count is now floored to
-  `div_up(window, 3968)` (62 pages plus a 2-page rounding margin) and capped at 256
-  (the split reducer), applied consistently in the host-side `causal_small_t_split_upper_bound`
-  and the device-side split selection.
-- **Engine OOM recovery** — original work by
-  [Gideon Zenz (gzenz)](https://github.com/gzenz) in the
-  [gzenz/ninfer](https://github.com/gzenz/ninfer) fork (September 2026), commit
-  `3f3272d6` ("Improve engine OOM recovery and qwen3_6 prefill stream safety"): a
-  `std::bad_alloc` (typically device-KV reservation failure) no longer crashes the
-  Engine worker. The materialization reserve in admission is guarded and fails only the
-  affected request with a retryable `Overloaded` error; the worker loop catches OOM,
-  errors the active/materializing requests through a per-step-guarded
-  `force_complete_error`, resets the scheduler and program state while leaving pending
-  requests in the FIFO, and continues with a bounded admission backoff — after
-  `kOomMaxRecoveries` (8) consecutive failed recoveries it fails all pending instead.
-  Recoverable `logic_error`s take the same path, and the fatal crash handler now logs a
-  `WORKER CRASH` diagnostic. The commit's qwen3_6 prefill stream-sync hunk was not
-  taken (that target does not exist in this fork).
-- **Concurrent staged-prefill lanes** — original work by
-  [Gideon Zenz (gzenz)](https://github.com/gzenz) in the
-  [gzenz/ninfer](https://github.com/gzenz/ninfer) fork (September 2026), commit
-  `576e72ea` ("Support concurrent staged-prefill lanes and apply YARN scaling to DFlash
-  target RoPE positions"): staged prefill ownership changed from a single optional lane
-  to a per-lane bitmask in the Scheduler, so several requests may prefill
-  simultaneously. A staged prefill holds no resource transaction (materialization
-  already committed the lane's full reservation), so admission is no longer gated
-  behind a prefill owner — waiting requests can be admitted to free lanes while others
-  are prefilling, and every prefill unit boundary re-arms the admission check, letting
-  one request's prefill overlap the prefill and decode of the rest. Each worker
-  boundary still advances exactly one staged lane (lowest index first, skipping
-  capture-offering lanes). The commit's bundled qwen3_6 YARN RoPE-position scaling was
-  not taken (that target does not exist in this fork; this fork applies YaRN through
-  the RoPE op instead).
-
-## Local changes
-
-**Prefix caching**
-
-The reuse model is still upstream's. A prefix hit needs a *complete* checkpoint, meaning a
-StateImage plus the Main (and speculative-backend) KV at that exact prompt frontier, so capacity
-is counted in checkpoints and KV page groups, not tokens. What this fork changes is how that
-checkpoint set is leased, sized, valued, retained and evicted when the Device is under pressure.
-Upstream tends to re-prefill almost every request in long multi-turn agent sessions; with these
-changes the fork mostly reuses them. The invariants and derivations are in
-[paged KV context store](docs/maintainer/paged-kv-cache.md),
+NInfer can skip prefilling a prompt prefix it has already processed, but only from a *complete
+checkpoint*: the saved model state plus the KV cache at that exact point in the prompt. The rules
+for when a checkpoint can be reused are upstream's. This fork changes how GPU and host memory is
+shared out among checkpoints, which ones are kept, and which ones are thrown away when memory runs
+short. On long multi-turn agent sessions, upstream ends up re-prefilling most requests; this fork
+reuses most of them. Details are in [paged KV context store](docs/maintainer/paged-kv-cache.md),
 [resource scheduling and context cache](docs/maintainer/resource-scheduling-and-context-cache.md)
 and [HTTP serving](docs/serving.md).
 
-- **Device KV is leased, not reserved up front.** Upstream holds each request's full
-  prompt-plus-output KV from admission to completion, so a `max_tokens: 64000` client parks its
-  whole output budget and one long request can starve the cache. The fork leases the prompt plus
-  a bounded output window and extends it at decode-round boundaries. When the pool has no space
-  for the extension, the engine releases idle retained cache owners (least recently used first,
-  only owners that hold Device pages) and extends the lease, so a live answer outranks retained
-  cache. Only if nothing can be freed does the request end with `finish_reason: length` instead
-  of failing. The request log and `server_start` ledger report the lease separately from real
-  occupancy, and show the resolved Host tier sizes.
-- **Pressure demotes before it destroys.** A prefix that loses its Device KV is moved to Host
-  whenever Host can take it, for private conversations and shared prefixes alike. Upstream's
-  pressure fallback cleared both tiers at once.
-- **When something must go, the oldest goes, and only what is needed.**
-  - *One recency order.* Private conversations and shared prefixes are ranked together by their
-    latest hit *or publication*, so a conversation that has just finished counts as recently used.
-  - *The escape-hatch ladder* gives up the oldest owners first, then spares every sacrificed
-    owner the admission does not actually need. For example, a shortage of private catalog slots
-    no longer destroys shared prefixes.
-  - *If demotion cannot happen,* the ladder retries a rung with the kept owners left in place,
-    and it treats sacrificing every ranked owner as a real rung. The clear-all target is only a
-    last-resort liveness backstop.
-  - *Other admission candidates* are bounded by their own ladder, never by a clear-all.
-  - *A fallback that cannot seal* makes the admission wait and re-plan instead of failing every
-    request.
-- **Retention value reflects future use.** A checkpoint loses its value only when its own session
-  sends a prompt that has moved past it. Prefixes the current request cannot use (other
-  conversations, shared prefixes) keep their value, instead of looking free to evict. This narrows
-  the upstream PR #300 unreachable-checkpoint change listed above.
-- **One Host RAM budget: `--host-cache-mib`.** Upstream sizes the Host tier from two independent
-  allocations plus catalog limits, so the pinned RAM is their sum. The fork derives the whole tier
-  from one pinned-RAM ceiling. It sizes the StateImage pool for the checkpoint inventory the
-  capture path really creates, spends spare state headroom on more long anchors per conversation,
-  gives Host KV the remainder, and refuses to start rather than overcommit.
-- **Engine-automatic long anchors.**
-  - *Automatic placement.* Message boundaries are anchored without client markers
-    (`--max-long-anchors-per-continuation`), so rewriting an older message resumes from a nearby
+- **GPU KV memory grows with the answer instead of being reserved up front.** Upstream reserves
+  room for the full prompt plus the full `max_tokens` output when a request starts, so a client
+  asking for `max_tokens: 64000` holds all of that for the whole request and squeezes out the
+  cache. This fork reserves the prompt plus a 4,096-token output window, then extends it as the
+  answer grows.
+  - If the GPU pool is full of cached prefixes when the answer needs more room, the engine frees
+    the least recently used idle cache entries (only ones actually holding GPU pages) and carries
+    on. A running answer always wins over cached data. Before this, answers could stop at about
+    4,000 tokens, often mid-reasoning; in one real Qwen Code session this happened on 8 of 53
+    requests. The console shows
+    `[engine] Device KV lease of lane N extended: released K retained cache owner(s)`.
+  - Only if nothing can be freed does the answer end early, with `finish_reason: "length"` and a
+    one-off `[engine] warning`, rather than failing.
+  - The request log and the `server_start` memory report show the reserved amount separately
+    from actual use.
+- **Memory pressure moves cache to host RAM before deleting it.** When a prefix loses its GPU
+  copy, it is moved to host memory if there is room, for both private conversations and shared
+  prefixes. Upstream cleared both copies at once.
+- **When something must be evicted, the oldest goes first, and only as much as needed.**
+  - Private conversations and shared prefixes share one "least recently used" order. A
+    conversation that has just finished counts as recently used.
+  - Eviction gives up the oldest entries first, then keeps any it turns out not to need. For
+    example, running out of private-conversation slots no longer deletes shared prefixes.
+  - If moving to host RAM is not possible, it tries again with the kept entries left in place.
+    Clearing everything is only a last resort to keep the engine moving.
+  - Other requests waiting to start are limited in the same way and never trigger a full clear.
+  - If a fallback plan cannot be carried out, the request waits and plans again instead of every
+    request failing.
+- **A checkpoint loses its value only when its own conversation has moved past it.** Upstream PR
+  #300 (by [pkochubey](https://github.com/pkochubey), for upstream issue
+  [#178](https://github.com/Neroued/ninfer/issues/178)) stopped counting checkpoints the incoming
+  request cannot use. This fork narrows that: checkpoints from other conversations and shared
+  prefixes keep their value, because other requests can still use them, so they no longer look
+  free to evict.
+- **One host RAM setting: `--host-cache-mib`.** Upstream sizes host cache from two separate
+  allocations plus several catalog limits, so total pinned RAM is their sum. Here one ceiling
+  covers everything: the engine sizes the saved-state pool for the checkpoints it will really
+  create, spends any spare room on more long anchors per conversation, gives host KV the rest,
+  and refuses to start rather than over-commit.
+- **Long anchors are placed automatically.**
+  - Checkpoints are placed at message boundaries without the client marking them
+    (`--max-long-anchors-per-continuation`), so editing an older message resumes from a nearby
     anchor instead of from the start.
-  - *Geometric spacing.* The grid widens back from the prompt end (`--long-anchor-spacing`,
-    default 1024 tokens), so short tool-loop turns do not each cost an anchor and deep history
-    stays covered.
-  - *Replacement.* A full anchor set gives up the anchor whose loss costs the least coverage,
-    rather than the deepest one.
-- **Nothing prefilled is thrown away.** An aborted request publishes the context it had already
-  prefilled, so a retry resumes from that point. A lane publishes with its staged-prefill
-  bookkeeping cleared.
-- **Shared captures cannot take the engine down.** A shared-prefix capture seals under the same
-  seal-window claim as materialization, and skips the capture (it is optional) instead of
-  throwing if the seal fails.
-- **Cost-scaled materialization search budget.** Addresses the crux of
-  [Neroued/ninfer#229](https://github.com/Neroued/ninfer/issues/229): the flat 5 ms
-  under-pressure search budget only covers about 10 targets before it times out, so valuable
-  plans are missed. Implements the solution suggested by Gene0Liu: the budget scales with the
-  incumbent's cost, from a 5 ms floor to a 250 ms cap.
-- **Automatic shared-prefix catalog reclaim.** Looks to resolve
-  [Neroued/ninfer#251](https://github.com/Neroued/ninfer/issues/251): once every
-  `--max-shared-prefixes` slot was resident, automatic candidates were dropped and shared-prefix
-  reuse froze until restart. Implements the solution suggested by albertov: reclaim the least
-  recently used eligible automatic entry. Here that means oldest by latest hit or publication, and
-  the entry is released only when the capture that publishes into its slot is selected.
+  - Anchors are spaced further apart the further back they are (`--long-anchor-spacing`, default
+    1024 tokens), so short tool-loop turns do not each use one up and older history stays covered.
+  - When the set is full, the anchor whose loss costs the least coverage is replaced, rather than
+    the deepest one.
+- **Work already done is kept.** A request that is aborted still saves the part of the prompt it
+  had prefilled, so a retry carries on from there.
+- **More time to find a good cache plan when admitting a request.** Picking which cached entries to
+  keep for a new request is a time-limited search.
+  - The search budget scales with how expensive the request is, from 5 ms up to 250 ms. A flat
+    5 ms covered only about 10 options, so good plans were missed (upstream issue
+    [#229](https://github.com/Neroued/ninfer/issues/229); approach suggested there by Gene0Liu).
+  - The overall planning allowance for each admission is always 250 ms. Upstream cuts it to 50 ms
+    while another request is running, which made the second request of a concurrent pair miss an
+    81K-token reusable anchor and re-prefill from scratch. The running request pauses for at most
+    that 250 ms, once per admission.
+  - With `--fast-prefill-kernel`, a different effective chunk size can lead this search down a
+    different path, so cache decisions can differ from a run without the flag.
+- **The shared-prefix list no longer fills up for good.** Once every `--max-shared-prefixes` slot
+  was in use, new shared prefixes were dropped and shared reuse stopped until restart (upstream
+  issue [#251](https://github.com/Neroued/ninfer/issues/251)). The least recently used automatic
+  entry is now replaced, only once the new prefix is actually being saved (approach suggested
+  there by albertov).
 
-Measured on a replay of the traffic that motivated this work (26 multi-turn tool-agent requests,
+Measured on a replay of the traffic that prompted this work (26 multi-turn tool-agent requests,
 `--host-cache-mib 40000`, Qwen3.8-27B NVFP4 + DFlash2, `--max-concurrency 2`, RTX 5090):
 
-- Token-level prefix reuse was 90.75 % overall and 98.08 % once warm, against 1.44 % in the
-  production window the replay was built from.
-- Fully evicted private owners fell from 179 to 2–3, and clear-all fallbacks from 55 to 0–1.
+- 90.75 % of prompt tokens came from cache overall (98.08 % once warm), against 1.44 % in the
+  production logs the replay was built from.
+- Fully evicted private conversations fell from 179 to 2–3, and full clears from 55 to 0–1.
 
-The replay predates the later ladder and valuation fixes and runs for only 3.7 minutes. On the
-same GPU, all 18 engine-real prefix scenarios in `ninfer_qwen3_5_prefix_real_test` pass. That
-includes `shared-saturation-reclaim`, `shared-replacement` and `private-checkpoint-pressure`, which
-fail on the tree before these changes. The four `review-*` scenarios fail there too and pass here.
+That replay predates some later eviction fixes and lasts only 3.7 minutes. All 18 real-engine
+prefix scenarios in `ninfer_qwen3_5_prefix_real_test` pass on this fork, including
+`shared-saturation-reclaim`, `shared-replacement`, `private-checkpoint-pressure` and the four
+`review-*` scenarios, which all fail without these changes.
 
-**Platform**
+### Faster prefill: `--fast-prefill-kernel`
 
-- **Native Windows build and run** — MSVC + CUDA on Windows: static CUDA runtime,
-  vcpkg-resolved FFmpeg/curl with runtime DLL staging, non-RDC NVFP4 kernels, `ws2_32` and
-  `UTF8PROC_STATIC`, TMA descriptors staged through pinned buffers (around MSVC's
-  `__grid_constant__` limitation), Windows mapped-file and `ReadOnlyFile` rules in the
-  artifact Reader, and re-application of the Windows build after upstream's per-component
-  CMake reorganisation.
-- **PNG image support in the vision path** — the prebuilt Windows vcpkg FFmpeg tree ships
-  without the PNG decoder, so a native PNG decode path (`NINFER_MEDIA_NATIVE_PNG`) was
-  added; the vision path accepts `.png` images on these builds.
-- **Converter recipe references on Windows** — the `--recipe FILE[:function]` reference
-  treats a colon inside the path (such as a Windows drive letter) as part of the path; only
-  a colon followed by a bare function name selects the entry function.
+An opt-in flag (off by default) on `ninfer-serve`, `ninfer-perplexity` and `ninfer_bench` that
+speeds up prefill with `--kv-dtype int8`, especially for long prompts. Without it, nothing
+changes. With it:
 
-**Operability and UX**
+- **A faster attention kernel for prompts.** Every prefill step wider than 16 tokens uses a new
+  INT8 prompt-attention kernel
+  (`src/ops/softmax_attention/dense/causal_cache/prompt_i8_fast.cuh`), written in the style of
+  FlashAttention-2:
+  - each warp keeps its 16 query rows, scores and output in registers for the whole pass over
+    the keys;
+  - the KV cache stays INT8 in memory, is double-buffered, and V is decoded in registers;
+  - the probability × V product runs on FP16 Tensor Cores and is added into FP32 once per
+    64-key tile, with an exact power-of-two rescale for V scales large enough to overflow FP16;
+  - a small cost model picks 128-row or 64-row blocks, and the longest blocks are launched first.
 
-- **Colourful console logging** — colourised operational and CLI statistics output for
-  visually tracking throughput, cache-reuse and memory statistics (`--log-colours`).
-- **Categorised help screens** — the flat CLI and serve option dumps were replaced with
-  named sections (Context, KV Cache, Speculative Decoding, Vision, Sampling, Networking &
-  Resources, …), making the flags easier to read and documenting previously undocumented
-  flags.
-- **`--kv-headroom-mib`** — manually specify the headroom used by the automatic KV
-  capacity sizing (upstream keeps a fixed 1 GiB; this makes it an operator choice).
-- **`--cuda-graph-allowance-mib`** — manually specify the CUDA Graph memory allowance
-  instead of the engine's automatic value.
-- **`--thinking-budget-message`** — manually specify the message appended when a request
-  hits its thinking budget, replacing the built-in end-of-thinking control message.
-- **llama.cpp-compatible `/v1/models` metadata** — the local re-implementation of
-  upstream PR #162 (above).
-- **`--chat-template`** — load the artifact chat template from a file.
+  At 131K context the kernel runs at about 313 TFLOP/s instead of 193 on an RTX 5090. Other KV
+  formats keep their existing kernels.
+- **Prefill chunks sized to fill the GPU evenly.** The effective `--prefill-chunk` is rounded
+  down to a whole number of GPU "waves" (896 tokens for this 24-head model on 170 SMs), so `4096`
+  runs as `3584` and `4480` stays as it is. This saves about 7 % of attention time at long
+  context.
 
-**Features**
+Measured against build `f351298e` (flag off) on Qwen3.8-27B NVIDIA NVFP4, `--kv-dtype int8`,
+RTX 5090:
 
-- **Ngram copy drafting above one concurrent request** — the local contribution here is
-  the C>1 extension of remesis's C=1 implementation: it makes ngram copy drafting work
-  with more than one concurrent request across MTP/DFlash/DFlash2, with a per-lane
-  decode frame, the cross-request retention archive enabled at concurrency above one,
-  and startup validation of the GDN width/concurrency limit.
-- **Vision offload re-implementation** — the local V3 re-implementation of the overlay
-  residency above: `--vision-residency overlay` streams the vision tower from pinned host
-  RAM instead of holding it on the GPU (per-object overlay staging), freeing device
-  memory for KV, including the fix that made the overlay path work for every artifact.
-- **`--rope-yarn-factor`** — startup-fixed YaRN context extension (factor 1–4, capped at
-  the 1M visible-keys limit).
-- **Q8 MTP with mixed-format row-split projection**, and a **runtime-shape bf16 GEMM
-  fallback** for shapes without a specialised kernel (full-precision vocab heads, bf16
-  vision-tower projections).
-- **Quasar NVFP4 conversion fixes** — dflash2 head-use declarations and an indexed
-  proposal head (`--proposal`) so rebuilt artifacts support `--lm-head-draft`.
+| Measurement | Flag off | Flag on | Change |
+|---|---|---|---|
+| New 16K prompt (`ninfer_bench`, prefill tok/s) | 10,059 | 10,438 | +3.8 % |
+| New 64K prompt | 6,803 | 7,801 | +14.7 % |
+| New 128K prompt | 4,717 | 5,891 | +24.9 % |
+| `bench/ab` workload, attention context under 60K (prefill tok/s) | 4,860 | 5,766 | +18.6 % |
+| `bench/ab` workload, 60–100K | 3,338 | 4,201 | +25.8 % |
+| `bench/ab` workload, over 100K | 2,956 | 3,762 | +27.3 % |
+| Perplexity, `--quick`, 64K context / 32K stride | 4.1679 | 4.1713 | +0.08 % |
 
-**Performance**
+- The workload rows pool 52 requests that got exactly the same cache reuse in both runs, over four
+  runs, with both runs using the same effective chunk size. Total prefill time fell 20 %, every
+  request got faster (1.17–1.31×), decode speed was unchanged, and average time to first token
+  fell 19 %.
+- Accuracy is unaffected: BF16 KV scores 4.1695 perplexity, so the fast kernel is as close to full
+  precision as the default one, and closer in three of the four test domains.
+- A variant sharing one block per KV head ("PackGQA") was also tried and dropped: it was never
+  faster and up to 1.4× slower on short chunks.
 
-- **`--fast-prefill-kernel` (opt-in; off by default)** — a faster prefill path for
-  `--kv-dtype int8`, available on `ninfer-serve`, `ninfer-perplexity` and `ninfer_bench`.
-  Without the flag every binary behaves exactly as before (same kernel, same chunking). With
-  it, two things change:
-  - **Fast INT8 prompt-attention kernel**
-    (`src/ops/softmax_attention/dense/causal_cache/prompt_i8_fast.cuh`), used for every
-    prefill wider than 16 tokens, rewritten FlashAttention-2 style:
-    - each warp owns 16 query rows for the whole key sweep, with scores, probabilities and
-      output in registers;
-    - K/V pages stay INT8 and double-buffered, and V is decoded in registers;
-    - P·V uses FP16 Tensor Cores with FP16 accumulation over each 64-key tile, promoted
-      into FP32 once per tile; an exact power-of-two rescale covers V scales whose
-      partials could leave the FP16 range;
-    - the launcher picks a 128-row or 64-row CTA from a wave-count cost model, and CTAs
-      are issued longest-first.
+### Other speed changes
 
-    Kernel throughput at 131K context rises from 193 to about 313 TFLOP/s on an RTX 5090.
-    Other KV formats keep their existing kernels.
-  - **Wave-aligned prefill chunks** — the effective `--prefill-chunk` is rounded down to
-    whole prompt-attention waves (896 tokens for the 24-head model on 170 SMs), so `4096`
-    runs as `3584` and `4480` is kept. This is worth about 7 % of attention time at long
-    context.
+- **Ngram copy drafting with more than one concurrent request.** Ngram drafting proposes the next
+  tokens by copying matching text from earlier in the context, alongside MTP/DFlash/DFlash2. The
+  single-request version is the original work of [remesis](https://github.com/remesis) in the
+  [remesis/ninfer](https://github.com/remesis/ninfer) fork (upstream issue
+  [#234](https://github.com/Neroued/ninfer/issues/234)). This fork extends it to
+  `--max-concurrency` above 1: each request gets its own drafting state, the shared history archive
+  is enabled, and startup checks the model's concurrency limit. See [ngram copy
+  proposals](docs/ngram.md).
+- **Several requests can prefill at the same time.** By David Oelfke in the
+  [gzenz/ninfer](https://github.com/gzenz/ninfer) fork (commit `576e72ea`). Upstream lets only one request prefill at a time and holds other
+  admissions until it finishes. Here new requests can be admitted to free lanes while others are
+  prefilling, so one request's prefill overlaps other requests' prefill and decode. Each step still
+  advances one prefilling request.
+- **Kernel tuning from upstream PRs:** partial last tile in the fused SwiGLU TMA route (#264) and
+  the sigmoid gate folded into the causal reduce step (#268), both by Michael Dementii; the text
+  `rmsnorm_rope` route (#273, Michael Dementii); tuned Q6 34,816×5120 dispatch (#284, by
+  [bingchengcc](https://github.com/bingchengcc)); and Q5 linear K-split sized to the token count
+  (#292, by [giveen](https://github.com/giveen)).
 
-  A PackGQA row mapping (one CTA per KV head, as on `gzenz/local/prefill-gqa-sharing`) was
-  also built and measured, then dropped: it never beat the per-head mapping and was up to
-  1.4× slower at small widths.
+### Tool calls and reasoning output
 
-  **Measured** against `f351298e` (flag off = that build) on Qwen3.8-27B NVIDIA NVFP4,
-  `--kv-dtype int8`, RTX 5090:
+- **More tool-call formats are understood.** Upstream PR #300 (by
+  [pkochubey](https://github.com/pkochubey), for upstream issue
+  [#276](https://github.com/Neroued/ninfer/issues/276)) accepts the XML forms emitted by Claude
+  Code and other agent tools: `<function name="…">`, `<invoke>`, `<function_calls>`, and the short
+  `<param>` / `</parameter>` tags, including while streaming.
+- **Repeated tool-call parameters keep the last value** (as JSON does) instead of turning the
+  whole call into plain text. From upstream PR #299 by [adubkov](https://github.com/adubkov); the
+  repair is counted as `duplicate_parameters_repaired`, and a short snippet is logged if a call
+  still falls back to text. PR #300's rejection of conflicting duplicates was replaced with this
+  rule.
+- **Quoting `</think>` no longer ends the reasoning early.** The engine used to end the reasoning
+  at the first `</think>` the model wrote, so a model thinking *about* chat templates had the rest
+  of its reasoning published as the answer, which clients such as Qwen Code reject as leaked
+  thinking tags. From upstream PR #309 by Fedor Suchkov, adapted here:
+  - `</think>` only ends the reasoning when a line break (or the end of the turn) follows it,
+    which is how the model really writes it. The PR also accepted a space, which still leaked in
+    a live test on text such as "the `</think>` tag".
+  - If a quoted `<tool_call>` does not parse, the parser tries later `<tool_call>` markers. It
+    does not restart at other marker forms, which would misread a truncated call.
+- **`--tolerant-tool-calls` (opt-in) rescues slightly broken tool calls.** Designed by David Oelfke in the
+  [gzenz/ninfer](https://github.com/gzenz/ninfer) fork (commits `b2267e06`, `0ce6e3f6`, `0f3c9f55`,
+  `38709834`, `44f2c9c3`) and ported onto this fork's parser. In tolerant mode:
+  - a good call followed by junk or a broken second call keeps the good call (logged as
+    `truncated_tail`);
+  - a final call cut off by the output limit is kept with its partial value, if at least one
+    parameter is complete;
+  - a missing `>` after the function name is repaired;
+  - calls to tools the client did not declare are still returned as tool calls.
 
-  | Measurement | Flag off | Flag on | Δ |
-  |---|---|---|---|
-  | Fresh prompt, 16K (`ninfer_bench`, prefill tok/s) | 10,059 | 10,438 | +3.8 % |
-  | Fresh prompt, 64K | 6,803 | 7,801 | +14.7 % |
-  | Fresh prompt, 128K | 4,717 | 5,891 | +24.9 % |
-  | `bench/ab` workload, avg attention context < 60K (prefill tok/s) | 4,860 | 5,766 | +18.6 % |
-  | `bench/ab` workload, 60–100K | 3,338 | 4,201 | +25.8 % |
-  | `bench/ab` workload, > 100K | 2,956 | 3,762 | +27.3 % |
-  | Perplexity, `--quick`, 64K context / 32K stride | 4.1679 | 4.1713 | +0.08 % |
+  Without the flag, the strict parser is used as before.
 
-  - **Workload rows:** they pool the 52 requests with identical prefix-cache reuse in both
-    arms across four runs. Total prefill time on them fell 20 %, every request was faster
-    (1.17–1.31×), and decode was unchanged.
-  - **Perplexity:** BF16 KV scores 4.1695, so the fast INT8 result sits as close to
-    full precision as the default kernel does. The fast kernel was closer to BF16 in three
-    of the four domains.
-  - **Cache-reuse caveat:** with both arms at the same effective chunk size, prefix-cache
-    decisions were identical (average TTFT −19 %). When the chunk sizes differ (e.g.
-    requesting `4096`, which the flag runs as `3584`), the time-boxed materialization
-    search can take a different path. The admission planning allowance is now 250 ms even
-    while another request runs (it was 50 ms), so the second request of a concurrent pair no
-    longer loses a large reusable anchor to a 35–40 ms search.
+### API and client compatibility
 
-**Prefix cache and output length**
+- **llama.cpp-style model details on `/v1/models`** (`n_vocab`, `n_ctx`, `n_ctx_train`, `n_embd`,
+  `n_params`, `size`, `ftype`). From upstream PR #162 by
+  [Hector Ramon Jimenez (hecrj)](https://github.com/hecrj), rewritten for the current source
+  layout.
+- **`ignore_eos` on chat completions.** Upstream PR #197 by [Thireus](https://github.com/Thireus).
+- **Responses API options used by Codex and Zed Agent:** `reasoning.summary` and
+  `include: ["reasoning.encrypted_content"]` are accepted. Upstream PR #295 by
+  [Macasacker](https://github.com/Macasacker), based on an earlier PR by
+  [Sha1rholder](https://github.com/Sha1rholder).
+- **`response_format` of `json_object` or `json_schema` is accepted** instead of refused, so
+  clients that always send one (such as Hermes-style clients) work. The format is not enforced,
+  as NInfer has no constrained decoding; `docs/serving.md` says so. Upstream PR #300 by
+  [pkochubey](https://github.com/pkochubey).
+- **A cut-off tool call is reported as cut off.** When the output or context limit truncates a
+  tool call, the finish reason is `length` (chat completions) or `max_tokens` /
+  `model_context_window_exceeded` (Messages), not `tool_calls` / `tool_use`, so a client does not
+  run a call with incomplete arguments. The partial call is still streamed. Upstream PR #300 by
+  [pkochubey](https://github.com/pkochubey).
+- **Continuing a partial assistant reply.** A request that ends with an assistant message is
+  treated as "continue this reply" on chat completions as well as Messages, and that message may
+  contain reasoning or tool calls (upstream PR #300 by [pkochubey](https://github.com/pkochubey)).
+  It only works with thinking off: with thinking on, the template would put the continued text
+  inside an open reasoning block, so the request is refused with `invalid_prompt`. When neither
+  the request nor the server says whether thinking is on, it now counts as on (matching the chat
+  template), so such a request is refused rather than rendered as a broken continuation that the
+  model ends after a few tokens.
 
-- **Retained cache gives Device KV back to a running answer** — a request's Device KV lease
-  starts at the prompt plus a 4,096-token output window and grows as it decodes. When the pool
-  was full of retained prefixes, growth failed and the answer stopped at about 4,000 tokens with
-  `finish_reason: "length"`, often mid-reasoning (a production Qwen Code session hit this on
-  8 of 53 requests, and a cold 38K-token prompt was cut at 4,018 tokens four times in a row).
-  The engine now releases idle retained owners, least recently used first and only owners that
-  hold Device pages, until the next growth step fits, then extends the lease. It logs
-  `[engine] Device KV lease of lane N extended: released K retained cache owner(s)`, and a
-  once-per-request `[engine] warning` if nothing can be freed. In a reproduction with a
-  40,960-token pool, the answer previously stopped at 4,059 of 12,000 tokens; it now completes
-  after releasing three retained owners.
-- **Full admission planning allowance under concurrency** — the materialization search budget
-  was capped at 50 ms whenever another request was running, and the second request of a
-  concurrent pair then missed an 81K-token reusable anchor and re-prefilled cold. The allowance
-  is now 250 ms in both cases; the concurrent decode pauses at most that once per admission.
+### Stability
 
-**Numerics**
+- **Out-of-memory no longer stops the engine.** By David Oelfke in the gzenz/ninfer fork (commit
+  `3f3272d6`). If reserving GPU memory fails, only the affected request fails, with a retryable
+  `Overloaded` error. If memory runs out mid-run, the active requests fail, the engine resets and
+  carries on with waiting requests still queued. After 8 failed recoveries in a row it fails the
+  queue instead. A fatal crash logs a `WORKER CRASH` message.
+- **Cache planning cannot race with itself.** By [Gideon Zenz (gzenz)](https://github.com/gzenz) in the
+  gzenz/ninfer fork (commit `c53e025c`). The step that checks and then commits an eviction plan could be disturbed by a
+  concurrent move to host RAM, which threw an error that stopped the whole engine. It is now
+  claimed atomically; if the claim or the commit fails, the request re-prefills instead of
+  failing. Saving a shared prefix uses the same claim and simply skips saving if it fails.
+- **No shared-memory overflow at very long contexts.** By David Oelfke in the gzenz/ninfer fork
+  (commit `7a876cf7`). Split-KV decode attention stages at most 64 KV pages per split, so at large
+  (YaRN-extended) contexts too few splits overflowed shared memory. The split count now has a
+  minimum based on the context length (and a maximum of 256).
 
-- **Accurate `silu` in the NVFP4 fused SwiGLU TMA epilogue** — reverts the approximate
-  activation upstream took in PR #250 (commit `05507ab0`), restoring `silu` at the four
-  call sites in `nvfp4_linear_swiglu_w4a4_tma.cuh` and deleting the now-unused
-  `silu_approx` helper. Follows
-  [Neroued/ninfer#285](https://github.com/Neroued/ninfer/issues/285), where
-  [bingchengcc](https://github.com/bingchengcc) measured the trade at model level rather
-  than op level: over 47,917 scored tokens the approximate form costs +0.009323 absolute
-  (+0.61 % relative) corpus perplexity (1.540180 against 1.530857), while the prefill wall
-  clock it buys back is only about 1.4 % (TTFT 1.832 s against 1.858 s on a 16,817-token
-  prompt) — far short of the ~10.8 % the Op benchmark reported — with decode unchanged.
-  Quality was judged the better side of that trade; every other SwiGLU epilogue in the
-  tree already computes the accurate form.
+### Models, conversion and vision
+
+- **GGUF files as conversion sources** (any ggml quantisation). Upstream PR #282 by
+  [giveen](https://github.com/giveen).
+- **Quasar NVFP4 conversion fixes:** DFlash2 head declarations and an indexed proposal head
+  (`--proposal`), so rebuilt artifacts support `--lm-head-draft`.
+- **Q8 MTP** with mixed-format row-split projection, and a **general BF16 GEMM fallback** for
+  shapes without a dedicated kernel (full-precision vocabulary heads, BF16 vision projections).
+- **`--rope-yarn-factor`** for YaRN context extension (factor 1–4, up to the 1M visible-key
+  limit).
+- **`--vision-residency overlay`** keeps the vision tower in pinned host RAM and streams it to
+  the GPU when needed, leaving more GPU memory for KV. Based on the original work by
+  [Valeriy Selitskiy (iamwavecut)](https://github.com/iamwavecut) for the previous-generation
+  engine, rewritten for this one and fixed to work with every artifact.
+
+### Windows
+
+- **Native Windows build and run** with MSVC and CUDA: static CUDA runtime, FFmpeg/curl from vcpkg
+  with their DLLs copied next to the executables, and workarounds for MSVC limits (non-RDC NVFP4
+  kernels, TMA descriptors passed through pinned buffers, Windows file-mapping rules).
+- **PNG images in the vision path.** The prebuilt vcpkg FFmpeg has no PNG decoder, so a built-in
+  PNG decoder (`NINFER_MEDIA_NATIVE_PNG`) was added.
+- **Converter recipe paths with drive letters.** In `--recipe FILE[:function]`, a colon inside
+  the path (such as `E:`) is treated as part of the path.
+
+### Options and console
+
+- **`--log-colours`** colours the console statistics (throughput, cache reuse, memory).
+- **Grouped help screens.** `--help` groups options into sections (Context, KV Cache,
+  Speculative Decoding, Vision, Sampling, Networking & Resources, …) and covers flags that were
+  previously undocumented.
+- **`--kv-headroom-mib`** sets how much GPU memory automatic KV sizing leaves spare (upstream
+  always leaves 1 GiB).
+- **`--cuda-graph-allowance-mib`** sets the CUDA Graph memory allowance instead of the automatic
+  value.
+- **`--thinking-budget-message`** sets the message inserted when a request reaches its thinking
+  budget.
+- **`--chat-template`** loads the chat template from a file instead of the artifact.
+
+### Kept in sync with upstream
+
+Upstream `master` is merged regularly, bringing in its ongoing kernel, build and engine work. Once
+upstream adopts a change listed above, it is removed from this README.
 
 ## Model artifacts
 
@@ -569,9 +459,10 @@ well, and for the work this branch builds on.
 
 ## Upstream README (direct copy)
 
-Everything below is a **direct, unmodified copy of the upstream
-[NInfer README](https://github.com/Neroued/ninfer/blob/master/README.md)**, as of the
-latest upstream sync (`9e163eee` on `origin/master`).
+Everything below is a copy of the upstream
+[NInfer README](https://github.com/Neroued/ninfer/blob/master/README.md) as of the latest upstream
+sync (`bace20dc` on `origin/master`), unchanged except for one added link to the fork's
+[ngram copy proposals](docs/ngram.md) guide.
 
 # NInfer
 
