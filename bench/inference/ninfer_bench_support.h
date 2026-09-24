@@ -61,6 +61,7 @@ struct BenchOptions {
     int warmup      = kDefaultWarmup;
     float rope_yarn_factor = 1.0F;
     std::optional<std::uint32_t> max_context;
+    bool fast_prefill_kernel    = false;
     std::uint32_t prefill_chunk = kDefaultPrefillChunk;
     KvCacheStorage kv_cache     = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
@@ -105,6 +106,7 @@ struct BenchEnvironment {
     float rope_yarn_factor      = 1.0F;
     std::uint32_t max_context   = 0;
     std::uint32_t prefill_chunk = kDefaultPrefillChunk;
+    bool fast_prefill_kernel    = false;
     KvCacheStorage kv_cache     = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     bool use_cuda_graph                            = true;

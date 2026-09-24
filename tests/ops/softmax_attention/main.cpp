@@ -3,6 +3,7 @@
 
 int run_softmax_attention_causal_cache_tests();
 int run_softmax_attention_dflash2_tests();
+int run_softmax_attention_int8_prompt_tests();
 int run_softmax_attention_nvfp4_tests();
 int run_softmax_attention_k8v4_tests();
 int run_softmax_attention_plain_and_packed_tests();
@@ -17,6 +18,8 @@ int main(int argc, char** argv) {
         return run_softmax_attention_wide_tests();
     if (argc == 2 && std::string_view(argv[1]) == "--dflash2-only")
         return run_softmax_attention_dflash2_tests();
+    if (argc == 2 && std::string_view(argv[1]) == "--int8-prompt-only")
+        return run_softmax_attention_int8_prompt_tests();
     if (argc == 2 && std::string_view(argv[1]) == "--nvfp4-only") {
         return run_softmax_attention_nvfp4_tests();
     }
@@ -25,7 +28,8 @@ int main(int argc, char** argv) {
     }
     if (argc != 1) {
         std::cerr << "usage: ninfer_softmax_attention_test "
-                     "[--dflash2-only|--nvfp4-only|--k8v4-only|--wide-only|--extended-only]\n";
+                     "[--dflash2-only|--int8-prompt-only|--nvfp4-only|--k8v4-only|--wide-only|"
+                     "--extended-only]\n";
         return 2;
     }
     const int causal = run_softmax_attention_causal_cache_tests();

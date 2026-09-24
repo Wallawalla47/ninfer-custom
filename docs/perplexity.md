@@ -20,7 +20,9 @@ English reference text, English long-form text, Chinese reference text, and NInf
 
 The default evaluation uses a 4,096-token context and a 2,048-token stride. Use `--context` and
 `--stride` to change that protocol, or score one UTF-8 file with `--text FILE`. The available Main
-KV representations are `bf16`, `int8`, `fp8`, `nvfp4`, and `k8v4`.
+KV representations are `bf16`, `int8`, `fp8`, `nvfp4`, and `k8v4`. `--fast-prefill-kernel` scores
+`int8` with the fast prompt-attention kernel (as `ninfer-serve --fast-prefill-kernel` prefills);
+`report.json` records it as `fast_prefill_kernel`.
 
 ```bash
 ./build/apps/ninfer-perplexity models/qwen3_8_27b.ninfer \
