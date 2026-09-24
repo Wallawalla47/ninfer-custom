@@ -261,6 +261,16 @@ RTX 5090:
   `rmsnorm_rope` route (#273, Michael Dementii); tuned Q6 34,816×5120 dispatch (#284, by
   [bingchengcc](https://github.com/bingchengcc)); and Q5 linear K-split sized to the token count
   (#292, by [giveen](https://github.com/giveen)).
+- **Kernel changes adapted from [llmq](https://github.com/IST-DASLab/llmq)** (IST-DASLab, Erik
+  Schultheis), from upstream PRs by [DuncanBetts](https://github.com/DuncanBetts):
+  - From 1,024 prompt tokens up, the NVFP4 attention-input projection runs its RMSNorm and
+    activation quantisation in one kernel, skipping one launch and one round trip of the
+    normalised activations through memory (#305). This applies to the NVFP4 artifacts on this page. The
+    output is byte-identical to the separate steps, and the PR measured the norm, quantise and GEMM
+    stage 4–17 µs faster per layer at 1,024–4,096 tokens.
+  - Target log-probabilities (perplexity / CausalScoring) find the maximum and the sum in a single
+    pass over the logits instead of two (#307): about 1.6× faster for that kernel. The results
+    match to within the existing test tolerance.
 
 ### Tool calls and reasoning output
 
@@ -302,6 +312,25 @@ RTX 5090:
   [Hector Ramon Jimenez (hecrj)](https://github.com/hecrj), rewritten for the current source
   layout.
 - **`ignore_eos` on chat completions.** Upstream PR #197 by [Thireus](https://github.com/Thireus).
+- **GitHub Copilot and other agent-host requests are accepted** instead of refused before
+  generation. From upstream PR #316 by [paq85](https://github.com/paq85) (Damian Sromek), with
+  only its serving commits taken:
+  - on chat completions, `custom` tools are served to the model as a function with one string
+    `input`, under the caller's own tool name. `tool_choice` `required`, named or `custom`,
+    `allowed_tools` in `required` mode, `strict: true` and `parallel_tool_calls: false` are
+    accepted but only advisory, because NInfer cannot force a call or constrain the arguments.
+    `reasoning_effort` `default` / `auto` use the server's own setting;
+  - tool names may be up to 256 bytes on every protocol (was 64, or 128 on Messages), because VS
+    Code wraps MCP tools under longer names such as `activate_fallback_mcp_<server>_<tool>`;
+  - a rejected tool name is reported with its value, byte length and exact location in the
+    request;
+  - `--usage-chunk-choice` (opt-in) gives the streamed usage chunk a blank choice, for clients that
+    reject the standard empty `choices` array.
+
+  The PR's tool-call parser rewrite is not merged: it would hide a failed tool call rather than
+  return it as text, which overlaps with this fork's opt-in `--tolerant-tool-calls` and its
+  handling of quoted `<tool_call>` text. Its prefix-cache test change is also left out, because
+  that test here no longer depends on the chat template.
 - **Responses API options used by Codex and Zed Agent:** `reasoning.summary` and
   `include: ["reasoning.encrypted_content"]` are accepted. Upstream PR #295 by
   [Macasacker](https://github.com/Macasacker), based on an earlier PR by

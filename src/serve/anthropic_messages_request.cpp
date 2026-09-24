@@ -90,7 +90,9 @@ std::string require_tool_name(const Json& object, const char* param) {
     }
     std::string name = object.at("name").get<std::string>();
     if (!valid_tool_name(name, kMaxToolNameLength)) {
-        bad_request("tool name must match [A-Za-z0-9_-]{1,128}", param);
+        bad_request("tool name must match [A-Za-z0-9_-]{1," +
+                        std::to_string(kMaxToolNameLength) + "}",
+                    param);
     }
     return name;
 }
