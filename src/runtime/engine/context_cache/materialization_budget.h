@@ -26,10 +26,14 @@ struct PlanningAllowance {
     const std::atomic<bool>* cancellation = nullptr;
     std::uint64_t control_deadline_ns     = std::numeric_limits<std::uint64_t>::max();
 
+    // A boundary gets the full 250 ms even while other requests run. Admission happens once per
+    // request, and a search stopped early can miss a large reusable prefix (tens of seconds of
+    // re-prefill) to save the running decode one pause of at most this allowance. The runnable
+    // requests still share the economic bound through `affected_requests`.
     [[nodiscard]] static PlanningAllowance
     boundary(std::uint32_t other_runnable, std::uint64_t now = planning_now_ns()) noexcept {
         return {.started_ns        = now,
-                .limit_ns          = other_runnable == 0 ? 250'000'000ULL : 50'000'000ULL,
+                .limit_ns          = 250'000'000ULL,
                 .affected_requests = 1U + other_runnable};
     }
 
