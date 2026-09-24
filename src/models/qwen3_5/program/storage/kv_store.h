@@ -860,6 +860,9 @@ public:
 
     [[nodiscard]] std::uint32_t occupied() const noexcept { return capacity() - free_count_; }
 
+    // The most pages one address may map or be entitled to.
+    [[nodiscard]] std::uint32_t page_capacity() const noexcept { return page_capacity_; }
+
     [[nodiscard]] std::optional<KVAddressSpaceHandle> create_active(std::uint32_t entitlement,
                                                                     std::int32_t execution_row) {
         if (entitlement == 0 || entitlement > page_capacity_) { return std::nullopt; }
@@ -1423,8 +1426,11 @@ public:
 
     void resize_entitlement(KVAddressSpaceHandle handle, std::uint32_t entitlement) {
         Address& address = require_active(handle);
-        if (entitlement < address.page_count || entitlement > page_capacity_) {
+        if (entitlement < address.page_count) {
             throw std::invalid_argument("KV entitlement is smaller than mapped pages");
+        }
+        if (entitlement > page_capacity_) {
+            throw std::invalid_argument("KV entitlement exceeds the address page capacity");
         }
         pages_->physical_pool().resize_reservation(address.reservation,
                                                    entitlement - address.page_count);

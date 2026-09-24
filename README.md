@@ -123,8 +123,8 @@ and [HTTP serving](docs/serving.md).
   cache. This fork reserves the prompt plus a 4,096-token output window, then extends it as the
   answer grows.
   - If the GPU pool is full of cached prefixes when the answer needs more room, the engine frees
-    the least recently used idle cache entries (only ones actually holding GPU pages) and carries
-    on. A running answer always wins over cached data. Before this, answers could stop at about
+    the least recently used idle cache entries (only ones actually holding GPU pages), just enough
+    for the answer's next step, and carries on. A running answer always wins over cached data. Before this, answers could stop at about
     4,000 tokens, often mid-reasoning; in one real Qwen Code session this happened on 8 of 53
     requests. The console shows
     `[engine] Device KV lease of lane N extended: released K retained cache owner(s)`.
@@ -331,6 +331,16 @@ RTX 5090:
   `Overloaded` error. If memory runs out mid-run, the active requests fail, the engine resets and
   carries on with waiting requests still queued. After 8 failed recoveries in a row it fails the
   queue instead. A fatal crash logs a `WORKER CRASH` message.
+- **Recovery really leaves the engine empty.** When an internal check fails mid-request (for
+  example a cache accounting error while several agents run at once), recovery used to discard
+  the requests but could leave some cached GPU KV pages or saved states with no owner. The engine
+  then looked full while idle, rejected every new request, and after 8 retries stopped serving
+  for good (every later request got HTTP 503). Now, if anything is still held after cleanup, the
+  engine rebuilds its cache stores from empty and logs
+  `[engine] recovery rebuilt the context stores: ...` with what had been left behind. A request
+  that still cannot start on an idle engine fails on its own instead of taking the engine down.
+  Cache accounting errors also now name the step that failed and the values involved, so the
+  cause can be traced from the console.
 - **Cache planning cannot race with itself.** By [Gideon Zenz (gzenz)](https://github.com/gzenz) in the
   gzenz/ninfer fork (commit `c53e025c`). The step that checks and then commits an eviction plan could be disturbed by a
   concurrent move to host RAM, which threw an error that stopped the whole engine. It is now

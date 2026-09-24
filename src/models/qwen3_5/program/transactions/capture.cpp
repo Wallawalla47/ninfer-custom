@@ -907,16 +907,19 @@ ActiveCaptureResult ProgramImpl::publish_active_capture(ActiveCaptureTransaction
     }
 
     const detail::PhysicalResources private_replacement_removed =
-        checked_resource_difference(removed, transaction.capacity_preparation_removed);
+        checked_resource_difference(removed, transaction.capacity_preparation_removed,
+                                    "capture replacement removed");
     request.optional_resources =
-        checked_resource_difference(request.optional_resources, private_replacement_removed);
+        checked_resource_difference(request.optional_resources, private_replacement_removed,
+                                    "capture optional resources");
     if (transaction.publish_private && !transaction.publish_shared) {
         request.optional_resources =
             checked_resource_sum(request.optional_resources, transaction.resource_delta.added);
     }
     request.active_resources = checked_resource_sum(
         checked_resource_difference(request.active_resources,
-                                    transaction.active_entitlement_delta.removed),
+                                    transaction.active_entitlement_delta.removed,
+                                    "capture active entitlement"),
         transaction.active_entitlement_delta.added);
 
     if (transaction.state_placement == qwen3_5::CaptureStatePlacement::DeviceFork) {

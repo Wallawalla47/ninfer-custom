@@ -1834,7 +1834,14 @@ private:
             const ActiveAdmissionSet active =
                 scheduler_.active_admission_set(slots_, max_concurrency_);
             if (active.size == 0) {
-                throw std::logic_error("isolated-feasible request is blocked in an idle Engine");
+                // Nothing running can free resources for this request, so it would wait forever.
+                // Fail it alone: as a worker error it would repeat on every boundary and exhaust
+                // the recovery streak, failing the whole Engine.
+                (void)remove_pending_error(
+                    head, std::make_exception_ptr(std::logic_error(
+                              "isolated-feasible request is blocked in an idle Engine")));
+                control_progress = true;
+                continue;
             }
             if (!scheduler_.protect_blocked_head(head->id, active.span(),
                                                  instance_.program->resource_revision())) {
@@ -1954,6 +1961,8 @@ private:
             }
             if (const auto shortfall =
                     instance_.program->device_kv_lease_shortfall(*request->sequence)) {
+                // Only the next step is paid for with retained cache: growth resumes one step at a
+                // time, so a full growth window would evict owners the answer may never need.
                 const std::uint32_t released = resources_.reclaim_device_kv_for_lease(
                     *instance_.program, shortfall->main_pages, shortfall->backend_pages);
                 if (instance_.program->resume_device_kv_lease(*request->sequence)) {
@@ -1967,13 +1976,15 @@ private:
                 }
                 if (!request->lease_shortfall_reported) {
                     request->lease_shortfall_reported = true;
+                    const auto remaining =
+                        instance_.program->device_kv_lease_shortfall(*request->sequence)
+                            .value_or(*shortfall);
                     std::fprintf(stderr,
                                  "[engine] warning: Device KV lease of lane %u cannot grow after "
                                  "releasing %u retained cache owner(s); still short %u main / %u "
                                  "backend pages for its smallest step, so the answer ends early "
                                  "with output_limit\n",
-                                 lane, released, shortfall->minimum_main_pages,
-                                 shortfall->minimum_backend_pages);
+                                 lane, released, remaining.main_pages, remaining.backend_pages);
                 }
             }
             const std::uint32_t control = request->output.control_suffix_tokens();
@@ -2089,8 +2100,7 @@ private:
         const std::shared_ptr<Request> materializing_request =
             materializing_ ? materializing_->request : nullptr;
         try { materializing_.reset(); } catch (...) {}
-        try { instance_.program->fail_all_cleanup(); } catch (...) {}
-        try { resources_.clear_after_program_cleanup(); } catch (...) {}
+        cleanup_program_locked();
         for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
             if (slots_[lane] != nullptr) {
                 auto slot_request = std::move(slots_[lane]);
@@ -2107,6 +2117,24 @@ private:
         try { publish_runtime_stats(); } catch (...) {}
     }
 
+    // Drops every Program owner and the Engine's catalog of them. Reports when the Program had to
+    // rebuild its context stores because an owner could not be released cleanly.
+    void cleanup_program_locked() noexcept {
+        decltype(instance_.program->fail_all_cleanup()) leaked;
+        try { leaked = instance_.program->fail_all_cleanup(); } catch (...) {}
+        try { resources_.clear_after_program_cleanup(); } catch (...) {}
+        if (leaked) {
+            std::fprintf(stderr,
+                         "[engine] recovery rebuilt the context stores: cleanup left %u main / %u "
+                         "backend Device KV pages (%u / %u leased), %u Device and %u Host "
+                         "StateImages and %zu Host KV bytes without an owner\n",
+                         leaked->device_main_kv_pages, leaked->device_backend_kv_pages,
+                         leaked->device_main_kv_lease_pages,
+                         leaked->device_backend_kv_lease_pages, leaked->device_state_slots,
+                         leaked->host_state_slots, leaked->host_kv_bytes);
+        }
+    }
+
     // The worker holds execution_mutex_ across the failing operation and this cleanup, so no
     // Program introspection can observe a partially cleared physical state.
     void fail_all_locked(std::exception_ptr error) noexcept {
@@ -2120,8 +2148,7 @@ private:
         const std::shared_ptr<Request> materializing_request =
             materializing_ ? materializing_->request : nullptr;
         try { materializing_.reset(); } catch (...) {}
-        try { instance_.program->fail_all_cleanup(); } catch (...) {}
-        try { resources_.clear_after_program_cleanup(); } catch (...) {}
+        cleanup_program_locked();
         for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
             if (slots_[lane] != nullptr) {
                 auto slot_request = std::move(slots_[lane]);

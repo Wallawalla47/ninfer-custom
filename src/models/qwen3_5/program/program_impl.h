@@ -435,10 +435,9 @@ struct RequestControl {
     // frontier its lease covers with its generation limit reason instead of failing a launch on
     // coverage.
     bool lease_settled = false;
-    // A settlement caused by pool space rather than the output ceiling, and the entitlements its
-    // full and smallest growth steps asked for: retained cache may give those pages back.
+    // A settlement caused by pool space rather than the output ceiling, and the entitlement its
+    // smallest growth step asked for: retained cache may give those pages back.
     bool lease_space_limited = false;
-    DeviceKVPages lease_full_target;
     DeviceKVPages lease_minimum_target;
 
     struct Prefill {
@@ -578,7 +577,9 @@ public:
     [[nodiscard]] AbortResult abort(SequenceHandle sequence) noexcept;
     [[nodiscard]] ReleaseResult release_continuation(ContinuationHandle&& continuation) noexcept;
     [[nodiscard]] ReleaseResult release_shared_prefix(SharedPrefixHandle&& shared) noexcept;
-    void fail_all_cleanup() noexcept;
+    [[nodiscard]] std::optional<qwen3_5::PhysicalUsageSnapshot> fail_all_cleanup() noexcept;
+    [[nodiscard]] bool context_stores_idle() const noexcept;
+    [[nodiscard]] bool rebuild_context_stores() noexcept;
     [[nodiscard]] detail::PhysicalResources admission_capacity() const noexcept;
     [[nodiscard]] bool isolated_request_feasible(const RequestBasePlan& base) const noexcept;
 
