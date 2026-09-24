@@ -833,6 +833,20 @@ int test_assistant_continuation_mode() {
                           ninfer::PromptContinuationMode::ContinueFinalAssistant,
                       "continuation mode did not reach PromptInput options");
 
+    // With thinking left to the server default the resolution must be concretely enabled, so
+    // the template's continuation guard refuses the mid-turn render (invalid_prompt) instead
+    // of letting the model finish the open turn with a one-token stop. Only an explicit
+    // thinking-disable may proceed as a continuation.
+    failures += check(semantics(cont_req.generation).enable_thinking == true,
+                      "trailing-assistant prefill with default thinking did not resolve enabled");
+    Json explicit_no_thinking = trailing_assistant;
+    explicit_no_thinking["enable_thinking"] = false;
+    const auto no_thinking_req = parse(explicit_no_thinking);
+    failures += check(no_thinking_req.generation.continuation ==
+                          ninfer::PromptContinuationMode::ContinueFinalAssistant &&
+                      semantics(no_thinking_req.generation).enable_thinking == false,
+                      "explicit thinking-disable did not remain a valid text-only continuation");
+
     return failures;
 }
 
