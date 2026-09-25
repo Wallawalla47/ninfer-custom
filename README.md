@@ -1,121 +1,134 @@
-# NInfer — local fork
+# NInfer — custom fork
 
-> **AI disclaimer:** Everything added to this fork, including this README, was written with AI
-> (mostly Qwen3.8-27B running on NInfer, plus a few other AI systems). It is likely to be
-> neither complete nor entirely accurate. This is hobby development.
+> **AI disclaimer:** Everything added to this fork, including most of this README, was written with
+> AI (mostly Claude Opus 5.5, Qwen3.8-27B running on NInfer, plus a few other AI systems I’ve been
+> testing). It is likely to be neither complete nor entirely accurate. This is hobby development.
 
-This is a personal fork of [Neroued/ninfer](https://github.com/Neroued/ninfer), kept on the
-`master` branch. It follows upstream closely and adds changes on top. The sections below explain
-what is different, grouped by topic, with credit given where a change came from someone else. The
-upstream README follows, copied unchanged, under the "Upstream README" heading.
+This is a personal fork of [Neroued/ninfer](https://github.com/Neroued/ninfer). It follows upstream
+closely and adds changes on top. The sections below explain what is different, grouped by topic,
+with credit given as best my AI agents can where a change came from someone else. The upstream
+README follows, copied unchanged, under the "Upstream README" heading. A huge thank you to Neroued
+for creating NInfer!
 
 **The short version.** Compared with upstream, this fork:
 
-- reuses cached prompt prefixes far more often in long multi-turn agent sessions, which cuts
-  average time-to-first-token by about three quarters on that kind of workload (by about half
-  with the original cache);
-- has an optional faster prefill kernel for long prompts (`--fast-prefill-kernel`);
-- uses a hybrid prefix cache by default that shares KV between conversations by content and keeps
-  it in GPU memory, host RAM and optionally on disk (outlined just below); upstream's checkpoint
-  catalog, with this fork's fixes, remains available with `--use-original-prefix-caching`;
-- lets ngram copy drafting run with more than one concurrent request;
-- decodes about 2-2.5 % faster per speculative round, with the same output, by overlapping each
-  decode kernel's launch and weight loading with the kernel before it;
-- accepts more tool-call formats and API options used by agent clients such as Claude Code, Qwen
-  Code, Codex and Zed;
-- builds and runs natively on Windows;
-- recovers from out-of-memory and planner errors instead of stopping the whole engine.
+1. includes changes allowing it to be built and run on Windows
+2. includes a new alternative prefix caching system designed and implemented by Claude Opus 5.5 as
+   the default. You also simply set an amount of system RAM to be used for prefix caching with
+   `--host-cache-mib N`. This is the best option and has proved to be quite a bit more effective
+   than the prefix caching currently in upstream NInfer. It can also be combined with
+   `--prefix-cache-file PATH` to load/store the prefix cache to a file on start/close. You do need
+   to close with Ctrl+C rather than closing the cmd window, as Windows does not necessarily allow
+   enough time post-window close to dump a large prefix cache to a file
+3. in case you want to stick with the original upstream prefix caching system, this is retained
+   with a raft of fixes and improvements (as I was working on this prior to going with a new
+   design – I found the upstream system to be too complex and fragile) – it is gated behind the
+   launch parameter `--use-original-prefix-caching`
+4. adds an option to use a faster prefill kernel when using int8 (Hadamard rotated) for KV cache
+   (which has a slight penalty to perplexity) by using launch parameter `--fast-prefill-kernel`
+5. adds ngram-mod copy drafting (based on an implementation by
+   [remesis](https://github.com/remesis)) to significantly increase the speed of copy-heavy
+   workloads
+6. improves decode speed with speculative decoding about 2-2.5% faster per speculative round, with
+   the same output, by overlapping each decode kernel's launch and weight loading with the kernel
+   before it
+7. adds the ability to offload the vision encoder to system RAM (by specifying
+   `--vision-residency overlay`) based on the work of Valeriy Selitskiy
+   ([iamwavecut](https://github.com/iamwavecut))
+8. enables the use of YaRN context extension for scaling context up to 1m tokens (by specifying
+   `--rope-yarn-factor F`, where F is a number from 1 to 4)
+9. allows the user to specify a custom thinking budget message (by specifying
+   `--default-thinking-budget N` and `--thinking-budget-message S`, where N is the budget of
+   thinking tokens and S is the thinking budget message specified in double quotes “”)
+10. includes various improvements (mostly sourced from others credited below) to fix some Qwen tool
+    calling issues and leaking thinking tokens etc. Use the launch parameter
+    `--tolerant-tool-calls` to fix some broken tool calls
+11. accepts more tool-call formats and API options used by agent clients such as Claude Code, Qwen
+    Code, Codex and Zed (again mostly based on the work of others credited below)
+12. makes improvements to the console logging including an option to turn on colourful logging
+    which allows for easier visual tracking of particular figures as the log progresses
+    (`--log-colours on`) and some average statistics shown at the bottom of the console view
+    (which can be turned off with `--log-stats-panel off`)
+13. has a help screen organised by category
+14. contains various other fixes and improvements (most of which are outlined below), including
+    merging in some PRs on the upstream repo.
 
-## The hybrid prefix cache at a glance
+I recommend using this with the NVIDIA NVFP4 artifact I’ve uploaded here:
+<https://huggingface.co/wallawalla47/Qwen3.8-27B-NVIDIA-NVFP4-NInferV3>
 
-The fork's default prefix cache replaces upstream's checkpoint catalog (still available with
-`--use-original-prefix-caching`) with a cache designed around how Qwen3.5-family models work.
-Most of their layers are linear-attention (GDN) layers, whose recurrent state cannot be rebuilt
-from the KV cache. So resuming a prompt needs two things: the KV
-of every earlier token, and a saved state at the exact token where the new prompt continues. The
-cache keeps those two things apart and stores each as cheaply as it can. Add `--host-cache-mib N`
-for host RAM (default 8192) and, optionally, `--prefix-cache-file PATH` to keep the cache across
-restarts; everything else is sized automatically.
+## Quick start (Windows)
 
-**What it stores**
+Prerequisites: Visual Studio 2026 (MSVC), the CUDA 13 toolkit, and FFmpeg + curl from vcpkg
+(`x64-windows`, at `C:\vcpkg`); adjust the paths at the top of `build_native.bat` for your machine.
 
-- **KV blocks keyed by content.** KV is kept in 64-token blocks in a radix tree. A block is
-  identified by its tokens (and any image it contains) plus the block before it, so the same
-  prefix is stored once however many conversations use it.
-- **Sparse state snapshots.** A snapshot is the model's recurrent state at one token position,
-  anchored on the block path that leads to it. Snapshots are taken only at planned points:
-  - *exact* points split the prefill: the end of the system prompt and tools, client cache
-    breakpoints, and the start of the assistant reply;
-  - *flexible* points cost nothing because they fall on prefill chunk boundaries: the end of the
-    prompt, and a few points spread back through long history;
-  - an *endpoint* snapshot at the end of each answer, which the next turn resumes from when the
-    client echoes the conversation back exactly.
+```bat
+build_native.bat configure
+build_native.bat build
+```
 
-**Where it keeps them**
+The server is `build-windows\apps\Release\ninfer-serve.exe`, with the FFmpeg, curl and zlib DLLs
+copied next to it. The launch I use on a single 32 GB RTX 5090 (stop any other resident model
+first):
 
-| Tier | Holds | Evicts |
-|---|---|---|
-| GPU | free VRAM after the model becomes block cache, plus a few snapshot slots | least recently used |
-| Host RAM | one pinned pool (`--host-cache-mib`) shared by blocks and snapshots | by prefill time saved per byte, dead KV first |
-| Disk (optional) | the host tier, saved on shutdown and reloaded at startup | replaced on each save |
+```bat
+ninfer-serve.exe qwen3_8_27b_nvfp4-nvidia.ninfer --host 127.0.0.1 --port 8080 --max-context 240000 --max-concurrency 2 --spec dflash2 --draft-tokens 7 --lm-head-draft --ngram-draft-tokens 15 --ngram-min-match 12 --kv-dtype int8 --fast-prefill-kernel --preserve-thinking --host-cache-mib 52000 --pending-timeout-ms 900000 --prefill-chunk 4096 --kv-capacity auto --kv-headroom-mib 0 --log-colours on --ngram-archive-mib 2048 --ngram-session-mib 256 --ngram-native-sessions --request-log-jsonl log.json --default-thinking-budget 16384 --thinking-budget-message "Considering the limited time available to the user, I must stop thinking now. Time to act:" --tolerant-tool-calls
+```
 
-A block leaving the GPU is copied to host RAM first when it is worth keeping, so GPU eviction
-usually only drops a copy.
-
-**How a request uses it**
-
-1. Admission walks the tree to the longest cached block path and picks the deepest usable
-   snapshot on it. A cost model chooses between restoring from host RAM and prefilling.
-2. The request reserves its GPU pages and a state slot. Anything held only in host RAM is copied
-   back on a separate stream in layer order. The request starts at once, and each layer waits only
-   for its own data.
-3. Prefill runs from the snapshot, taking new snapshots at the planned points. Its new blocks join
-   the tree as they are committed, so a request that arrives meanwhile can reuse them.
-4. Requests that arrive together with the same new prefix wait for the first one's snapshot
-   instead of all prefilling it.
-5. When the request ends, its blocks are written through to host RAM and its endpoint snapshot is
-   published. Pins keep everything a running request uses out of eviction's reach.
-
-**Where the code is**
-
-- `src/runtime/prefix_cache/`: the block tree and eviction (`prefix_index`), the snapshot
-  planner (`tap_planner`) and the cost model.
-- `src/models/qwen3_5/program/prefix/`: the model side. It covers GPU and host copies
-  (`hybrid_cache`), admission, snapshots and finish (`hybrid_program`), the host memory layout
-  and the cache file.
-- `src/runtime/engine/context_cache/hybrid_resource_manager.h`: the Engine's admission contract.
-
-Features and measurements are described under
-[Hybrid prefix cache](#hybrid-prefix-cache-the-default), and the full design
-in the [hybrid prefix cache spec](docs/maintainer/hybrid-prefix-cache-spec.md).
+Add `--prefix-cache-file PATH` to keep the prefix cache across restarts (stop the server with
+Ctrl+C). `ninfer-serve.exe --help` lists every option by category.
 
 ## Performance: this fork vs upstream
 
-### Three-way agentic A/B (September 2026)
+Both benchmarks below compare this fork with **upstream + Windows port**: upstream at the commit
+this fork last merged (`bace20dc`) plus only the Windows port (commit `96da12bb` on the branch
+`ab/upstream-windows-port-bace20dc`). Everything ran on an RTX 5090 under Windows with the
+official Qwen3.8-27B NVFP4 artifact (`qwen3_8_27b_nvfp4-official.ninfer`).
 
-The closed-loop agentic suite in [`bench/agentic_ab/`](bench/agentic_ab/README.md) replays three
+### Agentic coding workload (September 2026)
+
+The closed-loop suite in [`bench/agentic_ab/`](bench/agentic_ab/README.md) replays three
 coding-agent sessions plus eleven subagents: 130 requests with fan-outs, a concurrent subagent
-pair, compaction, retries, an abort and a solo wrap-up, prompts of 25K-135K tokens and thinking
-on. Each arm's own answers are fed back as an agent client does, and the three main sessions take
-their turns in lock-step rounds, so every build meets the same order of session turns whatever
-its speed. It ran on three workload seeds, each replaying different observations. All three arms
-served the official Qwen3.8-27B NVFP4 artifact on an RTX 5090 with the production launch flags
-(DFlash2 + ngram drafting, `--max-concurrency 2`, int8 KV, 52 GB host cache) and production
-sampling (temperature 1.0, top_p 0.95, top_k 20) at `--max-context 160000`, the largest context
-the upstream build starts with.
+pair, compaction, retries, an abort and a solo wrap-up, with prompts of 25K-135K tokens and
+thinking on. Each arm's own answers are fed back as an agent client does, and the three main
+sessions take their turns in lock-step rounds, so every build meets the same order of session
+turns whatever its speed. Every arm completed every request on each of three workload seeds (42,
+43, 44), which replay different observations.
 
-- **Upstream + Windows port:** upstream at the commit this fork merged, plus only the Windows port
-  (build `96da12bb`), given the same host RAM split as the original cache. It has no ngram
-  drafting.
-- **master:** this fork at `e36f7ee0` with the original prefix cache (then the default, now
-  `--use-original-prefix-caching`) and `--fast-prefill-kernel`.
-- **master + hybrid cache:** the same build with the hybrid prefix cache (then selected with
-  `--use-alt-prefix-caching`, now the default).
+Settings:
 
-Each cell is the mean over the three seeds with the lowest and highest seed in brackets; the
-changes are computed per seed against that seed's upstream run.
+- **Fork arms** (build `e36f7ee0`): the production launch flags, identical in both arms except
+  for the prefix cache. The hybrid-cache arm was then selected with `--use-alt-prefix-caching`;
+  today it is the default and the original-cache arm needs `--use-original-prefix-caching`. The
+  run also passed `--cuda-graph-allowance-mib 500`, an option since removed now that the
+  allowance is measured.
 
-| Metric | Upstream + Windows port | master | master + hybrid cache |
+  ```text
+  --max-context 160000 --max-concurrency 2 --spec dflash2 --draft-tokens 7 --lm-head-draft
+  --ngram-draft-tokens 15 --ngram-min-match 12 --kv-dtype int8 --fast-prefill-kernel
+  --preserve-thinking --host-cache-mib 52000 --pending-timeout-ms 900000 --prefill-chunk 4096
+  --kv-capacity auto --kv-headroom-mib 0 --ngram-archive-mib 2048 --ngram-session-mib 256
+  --ngram-native-sessions --default-thinking-budget 16384
+  --thinking-budget-message "Considering the limited time available to the user, I must stop
+  thinking now. Time to act:" --tolerant-tool-calls
+  ```
+
+- **Upstream arm:** the same flags minus those upstream does not have, with the host RAM split
+  the fork's original cache resolves from the same 52,000 MiB passed as explicit flags:
+
+  ```text
+  --max-context 160000 --max-concurrency 2 --spec dflash2 --draft-tokens 7 --lm-head-draft
+  --kv-dtype int8 --preserve-thinking --pending-timeout-ms 900000 --prefill-chunk 4096
+  --kv-capacity auto --default-thinking-budget 16384 --host-state-slots 115 --host-kv-mib 30515
+  --max-private-continuations 4 --max-long-anchors-per-continuation 25 --max-shared-prefixes 7
+  ```
+
+- **Context:** 160,000 tokens, the largest context the upstream build starts with under these
+  flags. **Sampling:** temperature 1.0, top_p 0.95, top_k 20, `max_tokens: 64000` on agent turns.
+
+Each cell is the mean over the three seeds, with the lowest and highest seed in brackets; changes
+are computed per seed against that seed's upstream run.
+
+| Metric | Upstream + Windows port | Fork, original cache | Fork, hybrid cache (default) |
 |---|---|---|---|
 | Average time to first token (s) | 15.7 (12.4-19.0) | 7.0 (6.6-7.7), −54 % | 3.3 (3.0-3.5), −78 % |
 | Median time to first token (s) | 10.0 (5.9-14.4) | 2.2 (1.8-2.8), −74 % | 0.8 (0.6-1.0), −90 % |
@@ -133,581 +146,312 @@ changes are computed per seed against that seed's upstream run.
 | Output tok/s, two requests decoding (combined) | 315 (305-324) | 295 (290-303), −6 % | 314 (304-320), 0 % |
 | Decode rounds/s, two requests decoding (engine speed) | 51.4 (51.3-51.4) | 45.9 (45.0-46.6), −11 % | 47.8 (46.8-48.5), −7 % |
 | Output tok/s, all decoding at the run's own batching | 197 (186-203) | 234 (225-248), +19 % | 253 (247-257), +28 % |
-| Decode rounds that ran two requests | 9.8 % | 38.3 % | 40.5 % |
 | Workload wall time (min) | 21.6 (19.9-23.1) | 18.0 (16.1-19.8), −17 % | 13.6 (12.6-15.1), −37 % |
 
-How to read it:
+- Time to first token includes queueing: up to seven requests are in flight on two lanes, and
+  the average queue wait was 12.8 s / 4.7 s / 2.6 s.
+- Output tok/s counts decode tokens per second of the engine's own decode time. It splits into
+  decode rounds/s (engine speed) and tokens per round (speculative acceptance, which moves with
+  what the model happened to write). The fork's ngram drafting supplied 8-11 % of its output;
+  upstream has none.
+- The two-request decode rows predate the concurrent decode fix (`824e5976`), and upstream
+  decoded two requests together for only 25-65 s per seed. The benchmark below measures
+  concurrent decode directly, after the fix.
 
-- Every arm completed every request on every seed. Against upstream, every seed agrees on the
-  direction of the average, median and continuing-session TTFT, cache hits, prefilled tokens and
-  whole-run output. master's TTFT on new long prompts and its count of main-session re-prefills
-  moved either way between seeds. The combined report (`bench/agentic_ab/analyze.py --aggregate`)
-  has every range.
-- TTFT includes queueing: up to seven requests are in flight on two lanes. The average queue wait
-  was 12.8 s / 4.7 s / 2.6 s. Without it, TTFT averaged 2.93 s / 2.38 s / 0.72 s.
-- The cache rows now repeat closely: across seeds, master served 74.4-76.3 % of prompt tokens from
-  cache and the hybrid cache 90.1-90.3 %. Before the sessions ran in lock-step, two runs of
-  one seed on one master build served 61.6 % and 72.6 %, because a faster or slower turn changed
-  which session's prefix was evicted.
-- Output tok/s is decode tokens per second of the engine's own decode time, so prefill and idle
-  time do not dilute it. It splits into decode rounds/s, the engine's speed, and tokens per round,
-  the speculative acceptance, which moves with what the model happened to write. With one request
-  decoding, the three arms run the same number of rounds per second within about 1 % on average
-  and 2 % on any seed; the differences in output tok/s come from acceptance. The fork's ngram drafting supplied 8-11 % of
-  its output; upstream has none.
-- With two requests decoding, master's rounds were about 11 % slower than upstream's and its
-  combined output 6 % lower; the hybrid-cache arm, on the same build, was 7 % slower per
-  round and even on output. Upstream decoded two requests together for only 25-65 s per seed, so
-  its two-request rows rest on little data.
-- The fork's whole-run output rate is higher because it decodes both lanes together in about 40 %
-  of its rounds, upstream in about 10 %.
-- Sampled output differs between arms and seeds (152K-195K completion tokens per run, about 78 %
-  thinking); the seed ranges include that variation.
+### Concurrent decode (September 2026)
 
-### Earlier A/B: original cache vs upstream (September 2026)
+The decode-saturation suite of `tools/bench/run_serve_concurrency.py` starts a fresh server at
+each `--max-concurrency` C and decodes C requests at once, each up to 8,192 tokens, with DFlash2
+K=7 and `--lm-head-draft` (no ngram drafting), stochastic sampling, `--max-context 32768
+--kv-capacity auto`. The fork (with `824e5976`) and upstream alternated point by point in two
+passes, C=1 to 8 and back.
 
-Both builds served the same model on the same GPU and replayed the same agent-style workload:
-
-- **Model and GPU:** the official NInfer Qwen3.8-27B NVFP4 artifact
-  (`qwen3_8_27b_nvfp4-official.ninfer`) on an NVIDIA GeForce RTX 5090.
-- **Context:** `--max-context 180000` for both, the largest context upstream can start with on
-  this card (see the note below the launch parameters).
-- **Workload:** 14 requests modelled on a real request log. They are multi-turn tool-agent
-  sessions sharing an ~82,000-token prefix, with a median prompt of about 121K tokens, including
-  two pairs of concurrent requests (one pair competing for the same cached prefix).
-  `--max-concurrency 2`, seed 42.
-
-| Metric | Upstream + Windows port | This fork | Change |
+| C | Upstream tok/s | Fork tok/s | Fork time per decode round vs upstream (pass 1, pass 2) |
 |---|---|---|---|
-| Average time to first token (s, lower is better) | 28.1 | 14.6 | −48.1 % |
-| Median time to first token (s, lower is better) | 25.9 | 11.3 | −56.6 % |
-| Prompt tokens served from cache | 19.8 % | 66.3 % | +46.5 points |
-| Cached tokens (of 1,649,215 prompt tokens) | 326,780 | 1,093,256 | +234.6 % |
-| Prefill tok/s on requests with no cache hit (median) | 4,159 | 4,220 | +1.5 % |
-| Output tok/s | 173 | 181 | +4.6 % |
+| 1 | 169.6 | 173.6 | −3.4 %, −1.6 % |
+| 2 | 322.9 | 323.5 | −1.6 %, −1.6 % |
+| 3 | 433.5 | 440.8 | −0.9 %, −1.0 % |
+| 4 | 557.8 | 552.0 | −0.9 %, −0.8 % |
+| 5 | 653.2 | 659.3 | −1.2 %, −0.7 % |
+| 6 | 753.7 | 754.4 | −0.7 %, −0.7 % |
+| 7 | 835.9 | 846.6 | −0.9 %, −0.8 % |
+| 8 | 926.0 | 940.6 | −1.0 %, −0.7 % |
 
-How to read it:
+Tok/s is the mean of both passes. The fork's decode rounds are faster at every concurrency; tok/s
+also moves with speculative acceptance on the sampled text, which is why C=4 is lower despite
+faster rounds.
 
-- Time to first token is averaged over all 14 requests.
-- "No cache hit" requests are those that had to prefill the whole prompt (upstream 11, fork 2).
-- Output tok/s is total completion tokens divided by total decode time. Thinking was on for both.
-  Upstream produced more tokens (12,639 against 6,543), but per-request decode rates are similar.
-- Where the cache hits came from (requests / cached tokens):
+### Running the benchmarks
 
-  | Reuse path | Upstream | This fork |
-  |---|---|---|
-  | Long anchor inside a private conversation | 0 / 0 | 9 / 766,476 |
-  | Replay of the previous response | 3 / 326,780 | 3 / 326,780 |
-  | No reuse (full prefill) | 11 / 0 | 2 / 0 |
+Build this fork, then the upstream control from the branch `ab/upstream-windows-port-bace20dc`
+([details](bench/agentic_ab/README.md#running-it)); stop any other server on the port first:
 
-Almost all of the gain comes from the prefix-cache changes described under
-[Prefix caching and KV memory](#prefix-caching-and-kv-memory). A workload with more copying would
-also gain output speed from ngram drafting (`--ngram-draft-tokens` / `--ngram-min-match`).
-
-This run predates `--host-cache-mib` and `--fast-prefill-kernel`, so the fork used the older
-separate cache flags shown below. The launch lists are kept as the record of what was measured;
-those flags configure the original prefix cache and now also need `--use-original-prefix-caching`.
-
-Launch parameters, this fork:
-
-```text
---host 127.0.0.1 --port 8080 --max-context 180000 --max-concurrency 2 --spec dflash2
---draft-tokens 7 --lm-head-draft --ngram-draft-tokens 15 --ngram-min-match 12
---kv-dtype int8 --preserve-thinking --host-kv-mib 24000 --pending-timeout-ms 900000
---prefill-chunk 2048 --kv-capacity auto --kv-headroom-mib 0 --log-colours on
---host-state-slots 64 --max-private-continuations 32
---max-long-anchors-per-continuation 8 --max-shared-prefixes 32
---ngram-archive-mib 2048 --ngram-session-mib 256 --ngram-native-sessions
---cuda-graph-allowance-mib 500 --default-thinking-budget 16384
---thinking-budget-message "Considering the limited time available to the user, I must stop
-thinking now. Time to act:"
+```bat
+build_native.bat configure
+build_native.bat build
+git worktree add C:\ab\control\src ab/upstream-windows-port-bace20dc
+set AB_CONTROL_SRC=C:\ab\control\src
+set AB_CONTROL_BUILD=C:\ab\control\build
+bench\agentic_ab\build_control.bat configure
+bench\agentic_ab\build_control.bat build
 ```
 
-Launch parameters, upstream + Windows port (the same list without the fork-only flags
-`--ngram-draft-tokens`, `--ngram-min-match`, `--kv-headroom-mib`, `--log-colours`,
-`--ngram-archive-mib`, `--ngram-session-mib`, `--ngram-native-sessions`,
-`--cuda-graph-allowance-mib` and `--thinking-budget-message`):
+Agentic workload (about 2.7 hours for three arms on three seeds). The runner reads the model path
+and launch flags from `AB_LAUNCH_BAT`, adds `--fast-prefill-kernel` to the fork arms, calibrates
+the largest context the control starts with, and writes `report.md` under
+`profiles\bench\agentic_ab\`. `treatment` is the fork with its default hybrid cache, `alt` the fork
+with `--use-original-prefix-caching`, and `control` upstream:
 
-```text
---host 127.0.0.1 --port 8080 --max-context 180000 --max-concurrency 2 --spec dflash2
---draft-tokens 7 --lm-head-draft --kv-dtype int8 --preserve-thinking
---host-kv-mib 24000 --pending-timeout-ms 900000 --prefill-chunk 2048 --kv-capacity auto
---host-state-slots 64 --max-private-continuations 32
---max-long-anchors-per-continuation 8 --max-shared-prefixes 32
---default-thinking-budget 16384
+```bat
+set AB_CONTROL_EXE=C:\ab\control\build\apps\Release\ninfer-serve.exe
+set AB_LAUNCH_BAT=<a launch .bat with the fork flags above>
+py -3.11 bench\agentic_ab\runner.py --arms treatment,alt,control --seeds 42,43,44
 ```
 
-Why 180000: upstream always keeps 1 GiB of GPU memory spare when sizing the KV cache
-automatically, and has no flag to lower it (the fork's `--kv-headroom-mib 0`). On a 32 GiB card
-that stops upstream from starting at the 220000 context used in production, so both builds ran at
-180000 to keep the comparison fair.
+Concurrent decode, one call per build (repeat `--concurrency` to sweep, or alternate single-point
+calls between the builds as above):
 
-The complete test rig (workload generator, runner, watchdog and control-build driver) is in
-[`bench/ab/`](bench/ab/README.md), so you can repeat the test with your own builds and flags.
+```bat
+py -3.11 tools\bench\run_serve_concurrency.py --serve build-windows\apps\Release\ninfer-serve.exe ^
+  --artifact q38=qwen3_8_27b_nvfp4-official.ninfer --mode dflash2_7 --suite decode-saturation ^
+  --max-context 32768 --kv-capacity auto --concurrency 1 --concurrency 8 --output profiles\bench\cc-fork
+```
+
+Upstream uses the same command with the control checkout's own copy of the script and its
+`ninfer-serve.exe`, because its server writes an older request-log schema. On Windows that copy
+needs `wait_for_final_throughput` from commit `21bca1c0`, which reads the final statistics
+interval that Windows otherwise loses when the server is stopped.
 
 ## What this fork changes
 
-Each topic below lists everything that affects it, whether written here or taken from elsewhere.
-"Upstream PR" means an open pull request on `Neroued/ninfer` that this fork has merged before
-upstream has.
-
-### Prefix caching and KV memory
-
-Most of the changes below are to upstream's checkpoint catalog, which the fork now runs only with
-`--use-original-prefix-caching`; the default is the
-[hybrid prefix cache](#hybrid-prefix-cache-the-default).
-
-NInfer can skip prefilling a prompt prefix it has already processed, but only from a *complete
-checkpoint*: the saved model state plus the KV cache at that exact point in the prompt. The rules
-for when a checkpoint can be reused are upstream's. This fork changes how GPU and host memory is
-shared out among checkpoints, which ones are kept, and which ones are thrown away when memory runs
-short. On long multi-turn agent sessions, upstream ends up re-prefilling most requests; this fork
-reuses most of them. Details are in [paged KV context store](docs/maintainer/paged-kv-cache.md),
-[resource scheduling and context cache](docs/maintainer/resource-scheduling-and-context-cache.md)
-and [HTTP serving](docs/serving.md).
-
-- **GPU KV memory grows with the answer instead of being reserved up front.** Upstream reserves
-  room for the full prompt plus the full `max_tokens` output when a request starts, so a client
-  asking for `max_tokens: 64000` holds all of that for the whole request and squeezes out the
-  cache. This fork reserves the prompt plus a 4,096-token output window, then extends it as the
-  answer grows.
-  - If the GPU pool is full of cached prefixes when the answer needs more room, the engine frees
-    the least recently used idle cache entries (only ones actually holding GPU pages), just enough
-    for the answer's next step, and carries on. A running answer always wins over cached data. Before this, answers could stop at about
-    4,000 tokens, often mid-reasoning; in one real Qwen Code session this happened on 8 of 53
-    requests. The console shows
-    `[engine] Device KV lease of lane N extended: released K retained cache owner(s)`.
-  - Only if nothing can be freed does the answer end early, with `finish_reason: "length"` and a
-    one-off `[engine] warning`, rather than failing.
-  - The request log and the `server_start` memory report show the reserved amount separately
-    from actual use.
-- **Memory pressure moves cache to host RAM before deleting it.** When a prefix loses its GPU
-  copy, it is moved to host memory if there is room, for both private conversations and shared
-  prefixes. Upstream cleared both copies at once.
-- **When something must be evicted, the oldest goes first, and only as much as needed.**
-  - Private conversations and shared prefixes share one "least recently used" order. A
-    conversation that has just finished counts as recently used.
-  - Eviction gives up the oldest entries first, then keeps any it turns out not to need. For
-    example, running out of private-conversation slots no longer deletes shared prefixes.
-  - If moving to host RAM is not possible, it tries again with the kept entries left in place.
-    Clearing everything is only a last resort to keep the engine moving.
-  - Other requests waiting to start are limited in the same way and never trigger a full clear.
-  - If a fallback plan cannot be carried out, the request waits and plans again instead of every
-    request failing.
-- **A checkpoint loses its value only when its own conversation has moved past it.** Upstream PR
-  #300 (by [pkochubey](https://github.com/pkochubey), for upstream issue
-  [#178](https://github.com/Neroued/ninfer/issues/178)) stopped counting checkpoints the incoming
-  request cannot use. This fork narrows that: checkpoints from other conversations and shared
-  prefixes keep their value, because other requests can still use them, so they no longer look
-  free to evict.
-- **One host RAM setting: `--host-cache-mib`.** Upstream sizes host cache from two separate
-  allocations plus several catalog limits, so total pinned RAM is their sum. Here one ceiling
-  covers everything: the engine sizes the saved-state pool for the checkpoints it will really
-  create, spends any spare room on more long anchors per conversation, gives host KV the rest,
-  and refuses to start rather than over-commit.
-- **Long anchors are placed automatically.**
-  - Checkpoints are placed at message boundaries without the client marking them
-    (`--max-long-anchors-per-continuation`), so editing an older message resumes from a nearby
-    anchor instead of from the start.
-  - Anchors are spaced further apart the further back they are (`--long-anchor-spacing`, default
-    1024 tokens), so short tool-loop turns do not each use one up and older history stays covered.
-  - When the set is full, the anchor whose loss costs the least coverage is replaced, rather than
-    the deepest one.
-- **Work already done is kept.** A request that is aborted still saves the part of the prompt it
-  had prefilled, so a retry carries on from there.
-- **More time to find a good cache plan when admitting a request.** Picking which cached entries to
-  keep for a new request is a time-limited search.
-  - The search budget scales with how expensive the request is, from 5 ms up to 250 ms. A flat
-    5 ms covered only about 10 options, so good plans were missed (upstream issue
-    [#229](https://github.com/Neroued/ninfer/issues/229); approach suggested there by Gene0Liu).
-  - The overall planning allowance for each admission is always 250 ms. Upstream cuts it to 50 ms
-    while another request is running, which made the second request of a concurrent pair miss an
-    81K-token reusable anchor and re-prefill from scratch. The running request pauses for at most
-    that 250 ms, once per admission.
-  - With `--fast-prefill-kernel`, a different effective chunk size can lead this search down a
-    different path, so cache decisions can differ from a run without the flag.
-- **The shared-prefix list no longer fills up for good.** Once every `--max-shared-prefixes` slot
-  was in use, new shared prefixes were dropped and shared reuse stopped until restart (upstream
-  issue [#251](https://github.com/Neroued/ninfer/issues/251)). The least recently used automatic
-  entry is now replaced, only once the new prefix is actually being saved (approach suggested
-  there by albertov).
-
-Measured on a replay of the traffic that prompted this work (26 multi-turn tool-agent requests,
-`--host-cache-mib 40000`, Qwen3.8-27B NVFP4 + DFlash2, `--max-concurrency 2`, RTX 5090):
-
-- 90.75 % of prompt tokens came from cache overall (98.08 % once warm), against 1.44 % in the
-  production logs the replay was built from.
-- Fully evicted private conversations fell from 179 to 2–3, and full clears from 55 to 0–1.
-
-That replay predates some later eviction fixes and lasts only 3.7 minutes. All 18 real-engine
-prefix scenarios in `ninfer_qwen3_5_prefix_real_test` pass on this fork, including
-`shared-saturation-reclaim`, `shared-replacement`, `private-checkpoint-pressure` and the four
-`review-*` scenarios, which all fail without these changes.
+Each topic lists everything that affects it, whether written here or taken from elsewhere.
+"Upstream PR" means an open pull request on `Neroued/ninfer` that this fork merged before upstream
+did.
 
 ### Hybrid prefix cache (the default)
 
-The fork's default prefix cache, replacing the checkpoint catalog above, which
-`--use-original-prefix-caching` selects instead. Design and status:
-[hybrid prefix cache](docs/maintainer/hybrid-prefix-cache-spec.md).
+Designed around how Qwen3.5-family models work: most of their layers are linear-attention (GDN)
+layers, whose recurrent state cannot be rebuilt from the KV cache, so resuming a prompt needs the
+KV of every earlier token plus a saved state at the exact token where the new prompt continues.
+The cache keeps the two apart and stores each as cheaply as it can
+([design](docs/maintainer/hybrid-prefix-cache-spec.md)).
 
-- **KV is cached per 64-token block, keyed by content.** Identical prompt blocks are stored once,
-  whichever conversation produced them, so a shared system prompt costs its GPU pages once at any
-  concurrency.
-- **Saved model state is sparse.** The recurrent state is saved only at useful points: where the
-  next turn resumes (the start of the assistant reply), the end of tools and system prompt,
-  explicit client cache breakpoints, the end of each answer, and a few points spread back through
-  long history. Most of these cost no extra prefill work.
-- **It configures itself.** The only setting is `--host-cache-mib N` (default 8192; `0` keeps
-  the cache on the GPU only). Free VRAM becomes GPU cache (`--kv-capacity`
-  defaults to `auto`), and the host budget is one pinned pool that KV blocks and saved states share,
-  split by how much prefill time each entry saves. Everything else is derived from
-  `--max-concurrency` and `--prefill-chunk`.
-- **Restores from host RAM overlap the request's own prefill.** A request resuming from host RAM
-  starts at once: each model layer waits only for its own restored data. The request computes early
-  layers while later ones are still being copied, so a long restored context costs little more than
-  its new tokens.
-- **Parallel requests with a new shared prefix prefill it once.** When requests share a prefix
-  that is not cached yet, such as subagents started together with the same system prompt, later
-  requests wait for the first one's saved state at the point where the prompts diverge. They
-  resume from it instead of prefilling the prefix again. Four requests with a new 13.9K-token
-  system prompt: mean time to first token 1.48 s instead of 3.52 s.
-- **The cache can survive a restart.** With `--prefix-cache-file PATH` (for example
-  `--prefix-cache-file "e:\NInfer-Deploy-V3\file.cache"`), the host RAM part of the cache is read
-  from that file at startup if it exists, and written back when the server shuts down with Ctrl+C
-  or Ctrl+Break, or when its console window is closed. Long conversations and system prompts then
-  resume instead of re-prefilling. Without the flag nothing is saved. A file from a different
-  model, KV format or `ninfer-serve` build is ignored and replaced at shutdown.
-  - Windows ends a closing console's process about 5 seconds after the close. A save that has not
-    finished by then is abandoned and the previous file is kept. At about 3 GB/s that covers a few
-    GiB of cache; for larger caches, stop the server with Ctrl+C, which has no time limit.
+- **KV is cached per 64-token block, keyed by content** (its tokens, any image in it, and the
+  block before it), in a radix tree. A shared system prompt is stored once and costs its GPU pages
+  once at any concurrency.
+- **Saved model state is sparse.** Snapshots are taken only at useful points: the end of the
+  system prompt and tools, client cache breakpoints, the start of the assistant reply, the end of
+  each answer, and a few points spread back through long history. Most cost no extra prefill work
+  because they fall on prefill chunk boundaries.
+- **Three tiers.** Free VRAM after the model becomes GPU block cache (`--kv-capacity` defaults to
+  `auto`); `--host-cache-mib` (default 8192, `0` = GPU only) is one pinned host RAM pool that
+  blocks and snapshots share, split by how much prefill time each entry saves; and
+  `--prefix-cache-file PATH` saves the host tier on shutdown and reloads it at startup. A file
+  from a different model, KV format or `ninfer-serve` build is ignored and replaced. Windows ends
+  a closing console window's process about 5 seconds after the close, so stop large caches with
+  Ctrl+C.
+- **Restores overlap the request's own work.** Host RAM copies run on a separate stream in layer
+  order and each layer waits only for its own data, so a long restored context costs little more
+  than its new tokens.
+- **Parallel requests with a new shared prefix prefill it once.** Later requests wait for the
+  first one's snapshot where the prompts diverge. Four requests with a new 13.9K-token system
+  prompt: mean time to first token 1.48 s instead of 3.52 s.
+- Everything except `--host-cache-mib` is derived from `--max-concurrency` and `--prefill-chunk`;
+  `--device-snapshot-slots`, `--cache-taps-per-request`, `--cache-tap-ladder` and
+  `--cache-tap-min-gap` are optional overrides.
+  Code: `src/runtime/prefix_cache/` (block tree, eviction, snapshot planner, cost model) and
+  `src/models/qwen3_5/program/prefix/` (GPU and host copies, admission, cache file).
+
+### Original prefix cache: `--use-original-prefix-caching`
+
+Upstream's checkpoint catalog (a saved state plus the KV at that exact point), kept with this
+fork's fixes. It is configured with `--host-cache-mib` or upstream's separate capacity flags,
+which require `--use-original-prefix-caching`. Details:
+[resource scheduling and context cache](docs/maintainer/resource-scheduling-and-context-cache.md).
+
+- **GPU KV grows with the answer instead of being reserved up front.** A request reserves its
+  prompt plus a 4,096-token output window and extends it as the answer grows, so `max_tokens:
+  64000` no longer squeezes out the cache. When the pool is full, the least recently used idle
+  entries are freed, just enough for the next step; only if nothing can be freed does the answer
+  end early with `finish_reason: "length"`.
+- **Memory pressure moves cache to host RAM before deleting it**, for private conversations and
+  shared prefixes alike.
+- **Eviction takes the oldest entries first, and only as many as needed**, in one least recently
+  used order across private conversations and shared prefixes; clearing everything is a last
+  resort, and a plan that cannot be carried out makes the request wait and re-plan.
+- **A checkpoint loses its value only when its own conversation has moved past it.** Builds on
+  upstream PR #300 by [pkochubey](https://github.com/pkochubey) (upstream issue
+  [#178](https://github.com/Neroued/ninfer/issues/178)).
+- **One host RAM setting, `--host-cache-mib`**, sizes the saved-state pool for the checkpoints
+  the engine will really create, spends spare room on more long anchors, gives host KV the rest,
+  and refuses to start rather than over-commit.
+- **Long anchors are placed automatically** at message boundaries, spaced further apart further
+  back (`--long-anchor-spacing`), and the one whose loss costs least coverage is replaced first.
+- **Aborted requests keep their prefilled prefix**, so a retry carries on from there.
+- **More time to find a cache plan:** the admission search budget scales from 5 ms to 250 ms with
+  the request's cost (upstream issue [#229](https://github.com/Neroued/ninfer/issues/229),
+  approach suggested there by Gene0Liu), and stays 250 ms while another request runs.
+- **The shared-prefix list no longer fills up for good**: the least recently used automatic entry
+  is replaced (upstream issue [#251](https://github.com/Neroued/ninfer/issues/251), approach
+  suggested there by albertov).
 
 ### Faster prefill: `--fast-prefill-kernel`
 
-An opt-in flag (off by default) on `ninfer-serve`, `ninfer-perplexity` and `ninfer_bench` that
-speeds up prefill with `--kv-dtype int8`, especially for long prompts. Without it, nothing
-changes. With it:
+Opt-in on `ninfer-serve`, `ninfer-perplexity` and `ninfer_bench`, for `--kv-dtype int8`:
 
-- **A faster attention kernel for prompts.** Every prefill step wider than 16 tokens (wider than
-  64 once the context is long, see below) uses a new INT8 prompt-attention kernel
-  (`src/ops/softmax_attention/dense/causal_cache/prompt_i8_fast.cuh`), written in the style of
-  FlashAttention-2:
-  - each warp keeps its 16 query rows, scores and output in registers for the whole pass over
-    the keys;
-  - the KV cache stays INT8 in memory, is double-buffered, and V is decoded in registers;
-  - the probability × V product runs on FP16 Tensor Cores and is added into FP32 once per
-    64-key tile, with an exact power-of-two rescale for V scales large enough to overflow FP16;
-  - a small cost model picks 128-row or 64-row blocks, and the longest blocks are launched first.
+- A FlashAttention-2 style INT8 prompt-attention kernel
+  (`src/ops/softmax_attention/dense/causal_cache/prompt_i8_fast.cuh`): each warp keeps its query
+  rows, scores and output in registers, the KV stays INT8 and double-buffered, and P×V runs on FP16
+  Tensor Cores. At 131K context it runs at about 313 TFLOP/s instead of 193.
+- The effective `--prefill-chunk` is rounded down to whole GPU waves (896 tokens for this model on
+  170 SMs), so `4096` runs as `3584`.
 
-  At 131K context the kernel runs at about 313 TFLOP/s instead of 193 on an RTX 5090. Other KV
-  formats keep their existing kernels.
-- **Prefill chunks sized to fill the GPU evenly.** The effective `--prefill-chunk` is rounded
-  down to a whole number of GPU "waves" (896 tokens for this 24-head model on 170 SMs), so `4096`
-  runs as `3584` and `4480` stays as it is. This saves about 7 % of attention time at long
-  context.
+Against the flag off (Qwen3.8-27B NVIDIA NVFP4, int8 KV): new-prompt prefill +3.8 % at 16K,
++14.7 % at 64K and +24.9 % at 128K; perplexity 4.1713 against 4.1679 (+0.08 %; BF16 KV scores
+4.1695).
 
-Measured against build `f351298e` (flag off) on Qwen3.8-27B NVIDIA NVFP4, `--kv-dtype int8`,
-RTX 5090:
+### Decode speed
 
-| Measurement | Flag off | Flag on | Change |
-|---|---|---|---|
-| New 16K prompt (`ninfer_bench`, prefill tok/s) | 10,059 | 10,438 | +3.8 % |
-| New 64K prompt | 6,803 | 7,801 | +14.7 % |
-| New 128K prompt | 4,717 | 5,891 | +24.9 % |
-| `bench/ab` workload, attention context under 60K (prefill tok/s) | 4,860 | 5,766 | +18.6 % |
-| `bench/ab` workload, 60–100K | 3,338 | 4,201 | +25.8 % |
-| `bench/ab` workload, over 100K | 2,956 | 3,762 | +27.3 % |
-| Perplexity, `--quick`, 64K context / 32K stride | 4.1679 | 4.1713 | +0.08 % |
-
-- The workload rows pool 52 requests that got exactly the same cache reuse in both runs, over four
-  runs, with both runs using the same effective chunk size. Total prefill time fell 20 %, every
-  request got faster (1.17–1.31×), decode speed was unchanged, and average time to first token
-  fell 19 %.
-- Accuracy is unaffected: BF16 KV scores 4.1695 perplexity, so the fast kernel is as close to full
-  precision as the default one, and closer in three of the four test domains.
-- A variant sharing one block per KV head ("PackGQA") was also tried and dropped: it was never
-  faster and up to 1.4× slower on short chunks.
-
-### Other speed changes
-
-- **Faster speculative decode rounds.** Output is unchanged token for token; only the time per round
-  changes.
-  - Kernels in the decode CUDA Graph launch as programmatic dependents of the kernel before them
-    (PDL). Weight-streaming kernels (the NVFP4/FP8 projections, the drafter's Q8/Q4 projections,
-    the GDN record step) load their first weight tiles while the previous kernel is still running,
-    and let the next kernel launch only after their own main loop, so the two never compete for
-    memory bandwidth. A 28-byte memset in the proposal head's top-k, which cost about 70 us of idle
-    GPU per round on Windows, is now a kernel.
-  - After each round the engine no longer waits for the recurrent-state fold before preparing the
-    next round, except when a finishing request still needs its input buffer.
-  - Measured on Qwen3.8-27B NVIDIA NVFP4, DFlash2 K=7, INT8 KV, RTX 5090:
-
-    | Measurement | Before | After | Change |
-    |---|---:|---:|---:|
-    | `ninfer_bench` greedy decode, 16K context (ms per round) | 16.79 | 16.39 | -2.4 % |
-    | `ninfer_bench` greedy decode, 16K context (decode tok/s) | 391.0 | 400.6 | +2.5 % |
-    | `ninfer_bench` greedy decode, 60K context (ms per round) | 18.00 | 17.61 | -2.2 % |
-    | `ninfer_bench` greedy decode, 60K context (decode tok/s) | 346.9 | 354.6 | +2.2 % |
-    | Served coding prompts, production thinking sampling, same seeds (output tok/s) | 208.1 | 213.7 | +2.7 % |
-
-    The `ninfer_bench` rows are 9 repetitions per arm, interleaved, with identical round and
-    acceptance counts in both builds (standard deviation at most 0.01 ms).
-
-    Both builds produced byte-identical greedy text through `ninfer-serve` with DFlash2 + ngram,
-    MTP and no speculation, and the same 141,575 sampled tokens in the served run. On the
-    closed-loop agentic A/B (`bench/agentic_ab`) the time per single-request decode round fell by
-    about 2 %; its headline output rates move by 5-10 % between runs with sampled content alone,
-    so they cannot resolve a change this size.
-  - Tried and not kept (details in [`RESEARCH_NOTES.md`](RESEARCH_NOTES.md)): a fused NVFP4 RMSNorm +
-    SwiGLU + down MLP (0.3 % faster alone, 0.7 % slower together with PDL), and restricting or
-    sharpening the DFlash2 proposal distribution (no gain in acceptance).
+- **Overlapped decode kernels.** Kernels in the decode CUDA Graph launch as programmatic
+  dependents of the kernel before them (PDL): weight-streaming kernels load their first weight
+  tiles while the previous kernel runs, and release the next kernel only after their own main
+  loop. Kernels that fill more than half the GPU release it only when they finish, so a following
+  one-wave kernel no longer squeezes onto the few free SMs (`824e5976`). A 28-byte memset that cost
+  about 70 µs per round on Windows is now a kernel, and the engine no longer waits for the
+  recurrent-state fold before preparing the next round. Output is unchanged token for token;
+  greedy decode is 2.2-2.5 % faster per round (DFlash2 K=7, 16K and 60K context). Ideas tried and
+  dropped are in [`RESEARCH_NOTES.md`](RESEARCH_NOTES.md).
 - **Ngram copy drafting with more than one concurrent request.** Ngram drafting proposes the next
   tokens by copying matching text from earlier in the context, alongside MTP/DFlash/DFlash2. The
   single-request version is the original work of [remesis](https://github.com/remesis) in the
   [remesis/ninfer](https://github.com/remesis/ninfer) fork (upstream issue
-  [#234](https://github.com/Neroued/ninfer/issues/234)). This fork extends it to
-  `--max-concurrency` above 1: each request gets its own drafting state, the shared history archive
-  is enabled, and startup checks the model's concurrency limit. See [ngram copy
-  proposals](docs/ngram.md).
-- **Several requests can prefill at the same time.** By David Oelfke in the
-  [gzenz/ninfer](https://github.com/gzenz/ninfer) fork (commit `576e72ea`). Upstream lets only one request prefill at a time and holds other
-  admissions until it finishes. Here new requests can be admitted to free lanes while others are
-  prefilling, so one request's prefill overlaps other requests' prefill and decode. Each step still
-  advances one prefilling request.
-- **Short prefill steps over long contexts use split-KV attention.** A prefill step of 17–64 new
-  tokens (a user message or a chat template's closing tokens) against a long context used the
-  prompt-attention kernel. That kernel runs one thread block per query head and row block, so it
-  left most of the GPU idle: 32 new tokens against 180K cached tokens took 9.5 ms per attention
-  layer. Such steps now use the chunked split-KV kernels that speculative verification already
-  used, once the context holds at least 64 cached tokens per new token (80 for 16-head models). The
-  same step then takes 1.06 ms, 4–12× faster from 16K to 180K tokens, for every KV format. With
-  ~90K cached tokens, a short follow-up question's time to first token fell from 204 ms to 91 ms
-  (together with fewer prefill splits in the hybrid prefix cache).
-- **Kernel tuning from upstream PRs:** partial last tile in the fused SwiGLU TMA route (#264) and
-  the sigmoid gate folded into the causal reduce step (#268), both by Michael Dementii; the text
-  `rmsnorm_rope` route (#273, Michael Dementii); tuned Q6 34,816×5120 dispatch (#284, by
-  [bingchengcc](https://github.com/bingchengcc)); and Q5 linear K-split sized to the token count
-  (#292, by [giveen](https://github.com/giveen)).
-- **Kernel changes adapted from [llmq](https://github.com/IST-DASLab/llmq)** (IST-DASLab, Erik
-  Schultheis), from upstream PRs by [DuncanBetts](https://github.com/DuncanBetts):
-  - From 1,024 prompt tokens up, the NVFP4 attention-input projection runs its RMSNorm and
-    activation quantisation in one kernel, skipping one launch and one round trip of the
-    normalised activations through memory (#305). This applies to the NVFP4 artifacts on this page. The
-    output is byte-identical to the separate steps, and the PR measured the norm, quantise and GEMM
-    stage 4–17 µs faster per layer at 1,024–4,096 tokens.
-  - Target log-probabilities (perplexity / CausalScoring) find the maximum and the sum in a single
-    pass over the logits instead of two (#307): about 1.6× faster for that kernel. The results
-    match to within the existing test tolerance.
+  [#234](https://github.com/Neroued/ninfer/issues/234)); this fork extends it to
+  `--max-concurrency` above 1. See [ngram copy proposals](docs/ngram.md).
+- **Several requests can prefill at the same time**, overlapping one request's prefill with other
+  requests' prefill and decode. By David Oelfke in the [gzenz/ninfer](https://github.com/gzenz/ninfer)
+  fork (commit `576e72ea`).
+- **Short prefill steps over long contexts use split-KV attention**: 32 new tokens against 180K
+  cached tokens take 1.06 ms per attention layer instead of 9.5 ms.
+- **Kernel tuning from upstream PRs:** the fused SwiGLU TMA partial tile (#264), sigmoid gate in
+  the causal reduce (#268) and text `rmsnorm_rope` route (#273), by Michael Dementii; tuned Q6
+  34,816×5120 dispatch (#284, [bingchengcc](https://github.com/bingchengcc)); Q5 linear K-split
+  sized to the token count (#292, [giveen](https://github.com/giveen)); and, adapted from
+  [llmq](https://github.com/IST-DASLab/llmq) (IST-DASLab, Erik Schultheis) by
+  [DuncanBetts](https://github.com/DuncanBetts), a fused NVFP4 RMSNorm + quantise for the attention
+  input projection (#305) and a single-pass target log-probability kernel (#307).
 
 ### Tool calls and reasoning output
 
-- **More tool-call formats are understood.** Upstream PR #300 (by
-  [pkochubey](https://github.com/pkochubey), for upstream issue
-  [#276](https://github.com/Neroued/ninfer/issues/276)) accepts the XML forms emitted by Claude
-  Code and other agent tools: `<function name="…">`, `<invoke>`, `<function_calls>`, and the short
-  `<param>` / `</parameter>` tags, including while streaming.
-- **Repeated tool-call parameters keep the last value** (as JSON does) instead of turning the
-  whole call into plain text. From upstream PR #299 by [adubkov](https://github.com/adubkov); the
-  repair is counted as `duplicate_parameters_repaired`, and a short snippet is logged if a call
-  still falls back to text. PR #300's rejection of conflicting duplicates was replaced with this
-  rule.
-- **Quoting `</think>` no longer ends the reasoning early.** The engine used to end the reasoning
-  at the first `</think>` the model wrote, so a model thinking *about* chat templates had the rest
-  of its reasoning published as the answer, which clients such as Qwen Code reject as leaked
-  thinking tags. From upstream PR #309 by Fedor Suchkov, adapted here:
-  - `</think>` only ends the reasoning when a line break (or the end of the turn) follows it,
-    which is how the model really writes it. The PR also accepted a space, which still leaked in
-    a live test on text such as "the `</think>` tag".
-  - If a quoted `<tool_call>` does not parse, the parser tries later `<tool_call>` markers. It
-    does not restart at other marker forms, which would misread a truncated call.
-- **`--tolerant-tool-calls` (opt-in) rescues slightly broken tool calls.** Designed by David Oelfke in the
-  [gzenz/ninfer](https://github.com/gzenz/ninfer) fork (commits `b2267e06`, `0ce6e3f6`, `0f3c9f55`,
-  `38709834`, `44f2c9c3`) and ported onto this fork's parser. In tolerant mode:
-  - a good call followed by junk or a broken second call keeps the good call (logged as
-    `truncated_tail`);
-  - a final call cut off by the output limit is kept with its partial value, if at least one
-    parameter is complete;
-  - a missing `>` after the function name is repaired;
-  - calls to tools the client did not declare are still returned as tool calls.
-
-  Without the flag, the strict parser is used as before.
+- **More tool-call formats**: the XML forms emitted by Claude Code and other agent tools
+  (`<function name="…">`, `<invoke>`, `<function_calls>`, short `<param>` tags), also while
+  streaming. Upstream PR #300 by [pkochubey](https://github.com/pkochubey) (upstream issue
+  [#276](https://github.com/Neroued/ninfer/issues/276)).
+- **Repeated tool-call parameters keep the last value** instead of turning the call into plain
+  text. Upstream PR #299 by [adubkov](https://github.com/adubkov).
+- **Quoting `</think>` no longer ends the reasoning early**: it only ends the reasoning when a line
+  break or the end of the turn follows. Adapted from upstream PR #309 by Fedor Suchkov.
+- **`--tolerant-tool-calls`** keeps a good call followed by junk, a final call cut off by the output
+  limit (if a parameter is complete), repairs a missing `>` after the function name, and returns
+  calls to undeclared tools. By David Oelfke in the [gzenz/ninfer](https://github.com/gzenz/ninfer)
+  fork, ported onto this fork's parser.
 
 ### API and client compatibility
 
-- **llama.cpp-style model details on `/v1/models`** (`n_vocab`, `n_ctx`, `n_ctx_train`, `n_embd`,
-  `n_params`, `size`, `ftype`). From upstream PR #162 by
-  [Hector Ramon Jimenez (hecrj)](https://github.com/hecrj), rewritten for the current source
-  layout.
-- **`ignore_eos` on chat completions.** Upstream PR #197 by [Thireus](https://github.com/Thireus).
-- **GitHub Copilot and other agent-host requests are accepted** instead of refused before
-  generation. From upstream PR #316 by [paq85](https://github.com/paq85) (Damian Sromek), with
-  only its serving commits taken:
-  - on chat completions, `custom` tools are served to the model as a function with one string
-    `input`, under the caller's own tool name. `tool_choice` `required`, named or `custom`,
-    `allowed_tools` in `required` mode, `strict: true` and `parallel_tool_calls: false` are
-    accepted but only advisory, because NInfer cannot force a call or constrain the arguments.
-    `reasoning_effort` `default` / `auto` use the server's own setting;
-  - tool names may be up to 256 bytes on every protocol (was 64, or 128 on Messages), because VS
-    Code wraps MCP tools under longer names such as `activate_fallback_mcp_<server>_<tool>`;
-  - a rejected tool name is reported with its value, byte length and exact location in the
-    request;
-  - `--usage-chunk-choice` (opt-in) gives the streamed usage chunk a blank choice, for clients that
-    reject the standard empty `choices` array.
-
-  The PR's tool-call parser rewrite is not merged: it would hide a failed tool call rather than
-  return it as text, which overlaps with this fork's opt-in `--tolerant-tool-calls` and its
-  handling of quoted `<tool_call>` text. Its prefix-cache test change is also left out, because
-  that test here no longer depends on the chat template.
-- **Responses API options used by Codex and Zed Agent:** `reasoning.summary` and
-  `include: ["reasoning.encrypted_content"]` are accepted. Upstream PR #295 by
+- **llama.cpp-style model details on `/v1/models`**: upstream PR #162 by
+  [Hector Ramon Jimenez (hecrj)](https://github.com/hecrj).
+- **`ignore_eos` on chat completions**: upstream PR #197 by [Thireus](https://github.com/Thireus).
+- **GitHub Copilot and other agent-host requests** (`custom` tools, advisory `tool_choice` /
+  `strict` / `parallel_tool_calls`, tool names up to 256 bytes, `--usage-chunk-choice`): the
+  serving commits of upstream PR #316 by [paq85](https://github.com/paq85) (Damian Sromek).
+- **Responses API options used by Codex and Zed Agent** (`reasoning.summary`,
+  `include: ["reasoning.encrypted_content"]`): upstream PR #295 by
   [Macasacker](https://github.com/Macasacker), based on an earlier PR by
   [Sha1rholder](https://github.com/Sha1rholder).
-- **`response_format` of `json_object` or `json_schema` is accepted** instead of refused, so
-  clients that always send one (such as Hermes-style clients) work. The format is not enforced,
-  as NInfer has no constrained decoding; `docs/serving.md` says so. Upstream PR #300 by
-  [pkochubey](https://github.com/pkochubey).
-- **A cut-off tool call is reported as cut off.** When the output or context limit truncates a
-  tool call, the finish reason is `length` (chat completions) or `max_tokens` /
-  `model_context_window_exceeded` (Messages), not `tool_calls` / `tool_use`, so a client does not
-  run a call with incomplete arguments. The partial call is still streamed. Upstream PR #300 by
-  [pkochubey](https://github.com/pkochubey).
-- **Continuing a partial assistant reply.** A request that ends with an assistant message is
-  treated as "continue this reply" on chat completions as well as Messages, and that message may
-  contain reasoning or tool calls (upstream PR #300 by [pkochubey](https://github.com/pkochubey)).
-  It only works with thinking off: with thinking on, the template would put the continued text
-  inside an open reasoning block, so the request is refused with `invalid_prompt`. When neither
-  the request nor the server says whether thinking is on, it now counts as on (matching the chat
-  template), so such a request is refused rather than rendered as a broken continuation that the
-  model ends after a few tokens.
+- **`response_format` `json_object` / `json_schema` is accepted** (not enforced), a **tool call
+  cut off by the output or context limit is reported as cut off** (`length` / `max_tokens`) rather
+  than as a tool call, and a request ending with an assistant message **continues that reply**
+  (thinking off only): upstream PR #300 by [pkochubey](https://github.com/pkochubey).
 
 ### Stability
 
-- **Out-of-memory no longer stops the engine.** By David Oelfke in the gzenz/ninfer fork (commit
-  `3f3272d6`). If reserving GPU memory fails, only the affected request fails, with a retryable
-  `Overloaded` error. If memory runs out mid-run, the active requests fail, the engine resets and
-  carries on with waiting requests still queued. After 8 failed recoveries in a row it fails the
-  queue instead. A fatal crash logs a `WORKER CRASH` message.
-- **Recovery really leaves the engine empty.** When an internal check fails mid-request (for
-  example a cache accounting error while several agents run at once), recovery used to discard
-  the requests but could leave some cached GPU KV pages or saved states with no owner. The engine
-  then looked full while idle, rejected every new request, and after 8 retries stopped serving
-  for good (every later request got HTTP 503). Now, if anything is still held after cleanup, the
-  engine rebuilds its cache stores from empty and logs
-  `[engine] recovery rebuilt the context stores: ...` with what had been left behind. A request
-  that still cannot start on an idle engine fails on its own instead of taking the engine down.
-  Cache accounting errors also now name the step that failed and the values involved, so the
-  cause can be traced from the console.
-- **Cache planning cannot race with itself.** By [Gideon Zenz (gzenz)](https://github.com/gzenz) in the
-  gzenz/ninfer fork (commit `c53e025c`). The step that checks and then commits an eviction plan could be disturbed by a
-  concurrent move to host RAM, which threw an error that stopped the whole engine. It is now
-  claimed atomically; if the claim or the commit fails, the request re-prefills instead of
-  failing. Saving a shared prefix uses the same claim and simply skips saving if it fails.
-- **No shared-memory overflow at very long contexts.** By David Oelfke in the gzenz/ninfer fork
-  (commit `7a876cf7`). Split-KV decode attention stages at most 64 KV pages per split, so at large
-  (YaRN-extended) contexts too few splits overflowed shared memory. The split count now has a
-  minimum based on the context length (and a maximum of 256).
+- **Out-of-memory no longer stops the engine**: only the affected requests fail, the engine resets
+  and carries on with the queue. By David Oelfke in the gzenz/ninfer fork (commit `3f3272d6`).
+- **Recovery really leaves the engine empty**: if cleanup leaves cache pages or states with no
+  owner, the engine rebuilds its cache stores instead of looking full and refusing every request.
+- **No resource-underflow HTTP 500s in the original cache**: releasing a request whose shared
+  cached pages became exclusive to another request now credits that request's entitlement.
+- **Cache planning cannot race with itself**: by [Gideon Zenz (gzenz)](https://github.com/gzenz)
+  in the gzenz/ninfer fork (commit `c53e025c`).
+- **No shared-memory overflow at very long (YaRN) contexts** in split-KV decode attention. By
+  David Oelfke in the gzenz/ninfer fork (commit `7a876cf7`).
 
 ### Models, conversion and vision
 
-- **GGUF files as conversion sources** (any ggml quantisation). Upstream PR #282 by
-  [giveen](https://github.com/giveen).
-- **Quasar NVFP4 conversion fixes:** DFlash2 head declarations and an indexed proposal head
-  (`--proposal`), so rebuilt artifacts support `--lm-head-draft`.
-- **Q8 MTP** with mixed-format row-split projection, and a **general BF16 GEMM fallback** for
-  shapes without a dedicated kernel (full-precision vocabulary heads, BF16 vision projections).
-- **`--rope-yarn-factor`** for YaRN context extension (factor 1–4, up to the 1M visible-key
-  limit).
-- **`--vision-residency overlay`** keeps the vision tower in pinned host RAM and streams it to
-  the GPU when needed, leaving more GPU memory for KV. Based on the original work by
-  [Valeriy Selitskiy (iamwavecut)](https://github.com/iamwavecut) for the previous-generation
-  engine, rewritten for this one and fixed to work with every artifact.
+- **GGUF files as conversion sources**: upstream PR #282 by [giveen](https://github.com/giveen).
+- **NVIDIA ModelOpt NVFP4 and FP8 checkpoints** as conversion sources (their scale layouts),
+  with the `qwen3_8_27b_nvfp4_nvidia` recipe storing the output head as FP8.
+- **Third-party Qwen checkpoints convert cleanly**: missing or non-standard tokenizer settings
+  that the runtime requires are rebuilt during conversion.
+- **Quasar NVFP4 conversion** with DFlash2 heads and an indexed proposal head (`--proposal`), so
+  rebuilt artifacts support `--lm-head-draft`.
+- **A `qwen3_8_27b_q6` recipe**, the Q6 fused gate/up projection shape, and a `grouped_mse`
+  scale-search method for groupwise quantisation.
+- **Q8 MTP** and a **general BF16 GEMM fallback** for shapes without a dedicated kernel.
+- **`--rope-yarn-factor F`** for YaRN context extension (F from 1 to 4, up to 1M tokens of context).
+- **`--vision-residency overlay`** keeps the vision tower in pinned host RAM and streams it to the
+  GPU when needed, and **`--vision-max-merged N`** bounds the merged vision tokens per image or
+  video (64–32768). Based on the original work by
+  [Valeriy Selitskiy (iamwavecut)](https://github.com/iamwavecut), rewritten for this engine.
 
 ### Windows
 
-- **Native Windows build and run** with MSVC and CUDA: static CUDA runtime, FFmpeg/curl from vcpkg
-  with their DLLs copied next to the executables, and workarounds for MSVC limits (non-RDC NVFP4
-  kernels, TMA descriptors stored into device memory by a staging kernel, Windows file-mapping
-  rules).
-- **PNG images in the vision path.** The prebuilt vcpkg FFmpeg has no PNG decoder, so a built-in
-  PNG decoder (`NINFER_MEDIA_NATIVE_PNG`) was added.
-- **Converter recipe paths with drive letters.** In `--recipe FILE[:function]`, a colon inside
-  the path (such as `E:`) is treated as part of the path.
+- **Native build and run** with MSVC and CUDA (see [Quick start](#quick-start-windows)): static
+  CUDA runtime, FFmpeg/curl from vcpkg, non-RDC NVFP4 kernels, TMA descriptors staged into device
+  memory by a kernel, a built-in PNG decoder for the vision path, and drive letters in converter
+  recipe paths.
+- **Running on another PC** needs an RTX 50-series GPU (the build targets `sm_120a`) and an NVIDIA
+  driver of 580 or later (CUDA 13); no CUDA toolkit is needed. Copy the DLLs next to
+  `ninfer-serve.exe` and install the Visual C++ redistributable if it is missing.
 
 ### Options and console
 
-- **`--log-colours`** colours the console statistics (throughput, cache reuse, memory).
-- **Session statistics panel.** On an interactive terminal the serve console pins a panel beneath
-  the scrolling log with session and last-ten averages of TTFT, cache hit rate, non-cached prefill
-  and decode speed, model-drafter (MTP/DFlash) acceptance and n-gram acceptance
-  (`--log-stats-panel off` removes it).
-- **Grouped help screens.** `--help` groups options into sections (Context, KV Cache,
-  Speculative Decoding, Vision, Sampling, Networking & Resources, …) and covers flags that were
-  previously undocumented.
+- **`--log-colours on`** colours the console statistics, and a **session statistics panel**
+  beneath the log shows session and last-ten averages of TTFT, cache hit rate, prefill and decode
+  speed and drafter acceptance (`--log-stats-panel off` removes it).
+- **Grouped `--help`** by category on `ninfer-serve` and the `ninfer` CLI, covering flags that
+  were previously undocumented, with separate sections for the two prefix caching systems. The CLI
+  statistics are coloured too.
 - **`--kv-headroom-mib`** sets how much GPU memory automatic KV sizing leaves spare (upstream
   always leaves 1 GiB).
-- **Measured CUDA Graph allowance.** The automatic allowance is 64 MiB plus 4 MiB per decode-graph
-  executable, sized from the graph memory measured on an RTX 5090 (DFlash2 with n-gram drafting at
-  `--max-concurrency 2` reserves 160 MiB and uses about 62 MiB, where upstream's per-profile
-  estimate reserves 1,920 MiB). Startup reports the memory the graphs actually used and warns
-  when it exceeds the allowance; **`--cuda-graph-allowance-mib`** replaces the automatic value.
-- **`--thinking-budget-message`** sets the message inserted when a request reaches its thinking
-  budget.
-- **`--chat-template`** loads the chat template from a file instead of the artifact.
+- **Measured CUDA Graph allowance**: the KV sizing reserves 64 MiB plus 4 MiB per decode-graph
+  executable, measured on an RTX 5090 across every speculative mode and concurrency (DFlash2 with
+  ngram drafting at `--max-concurrency 2` reserves 160 MiB and uses about 62 MiB, where upstream's
+  estimate reserves 1,920 MiB). Startup reports the memory the graphs used and warns if it ever
+  exceeds the allowance.
+- **`--thinking-budget-message S`** sets the message inserted when a request reaches its
+  `--default-thinking-budget N`, and **`--chat-template`** loads the chat template from a file.
 
 ### Kept in sync with upstream
 
-Upstream `master` is merged regularly, bringing in its ongoing kernel, build and engine work. Once
-upstream adopts a change listed above, it is removed from this README.
+Upstream `master` is merged regularly. Once upstream adopts a change listed above, it is removed
+from this README.
 
 ## Model artifacts
 
-**[Qwen3.8-27B-Quasar-NinferV3](https://huggingface.co/Wallawalla47/Qwen3.8-27B-Quasar-NinferV3)**
-on Hugging Face — a single-file `.ninfer` engine artifact of
-[QUASAR-QAT/Qwen3.8-27B-QUASAR-NVFP4](https://huggingface.co/QUASAR-QAT/Qwen3.8-27B-QUASAR-NVFP4)
-(the QAT-trained NVFP4 checkpoint), built with `tools/convert/quasar_nvfp4.py` for an
-RTX 5090 (sm_120a). The QUASAR NVFP4 weights are imported bit-exact (no requantisation
-round-trip); the DFlash2 draft model is grafted verbatim from the official NInfer
-artifact, and an indexed 131,072-row proposal head gathered from the QUASAR output head
-enables `--lm-head-draft`. The HF page carries the full creation outline and the
-conversion report.
+- **[Qwen3.8-27B-NVIDIA-NVFP4-NInferV3](https://huggingface.co/Wallawalla47/Qwen3.8-27B-NVIDIA-NVFP4-NInferV3)**
+  (recommended): [nvidia/Qwen3.8-27B-NVFP4](https://huggingface.co/nvidia/Qwen3.8-27B-NVFP4), the
+  Model Optimizer mixed NVFP4/FP8 checkpoint, converted with the `qwen3_8_27b_nvfp4_nvidia` recipe
+  in `tools/convert/official_recipes.py`. The weights are imported bit-exact except the output
+  head (NVFP4 → row-scale FP8), with the DFlash2 draft model and an indexed 131,072-row proposal
+  head for `--lm-head-draft`.
+- **[Qwen3.8-27B-Quasar-NinferV3](https://huggingface.co/Wallawalla47/Qwen3.8-27B-Quasar-NinferV3)**:
+  [QUASAR-QAT/Qwen3.8-27B-QUASAR-NVFP4](https://huggingface.co/QUASAR-QAT/Qwen3.8-27B-QUASAR-NVFP4),
+  the QAT-trained NVFP4 checkpoint, converted with `tools/convert/quasar_nvfp4.py`, with the same
+  DFlash2 draft model and proposal head.
 
-Configuration used for running it (single 32 GB GPU — stop any other resident model
-first):
-
-```bat
-ninfer-serve.exe "E:\NInfer-Deploy-V3-output\qwen3_8_27b_nvfp4-quasar-proposal.ninfer" --host 127.0.0.1 --port 8080 --max-context 240000 --max-concurrency 2 --spec dflash2 --draft-tokens 7 --lm-head-draft --ngram-draft-tokens 15 --ngram-min-match 12 --kv-dtype int8 --preserve-thinking --host-cache-mib 40000 --pending-timeout-ms 900000 --prefill-chunk 2048 --kv-capacity auto --kv-headroom-mib 0 --log-colours on --ngram-archive-mib 2048 --ngram-session-mib 256 --ngram-native-sessions --cuda-graph-allowance-mib 500 --request-log-jsonl log.json --default-thinking-budget 32000 --thinking-budget-message "I'm done thinking. Time to act:"
-```
-
-This is the `LaunchQwen3.8-27B-quasar-dflash2-ngram.bat` configuration with the retention tier
-in its single-knob form: `--host-cache-mib` is the one pinned host pool that the default hybrid
-prefix cache's KV blocks and state snapshots share.
-
-**[Qwen3.8-27B-NVIDIA-NVFP4-NInferV3](https://huggingface.co/Wallawalla47/Qwen3.8-27B-NVIDIA-NVFP4-NInferV3)**
-on Hugging Face — a single-file `.ninfer` engine artifact of
-[nvidia/Qwen3.8-27B-NVFP4](https://huggingface.co/nvidia/Qwen3.8-27B-NVFP4)
-(the Model Optimizer mixed NVFP4/FP8 checkpoint), built with the
-`qwen3_8_27b_nvfp4_nvidia` recipe in `tools/convert/official_recipes.py` for an
-RTX 5090 (sm_120a). The NVFP4 MLP and FP8 attention/GDN projections are
-imported bit-exact (no requantisation round-trip); only the output head is
-re-quantised (NVFP4 → row-scale FP8, because the engine registers the
-vocabulary projection only for Q8/Q6/FP8, and FP8 was benchmarked faster than
-Q8 at the decode/verify token range). The DFlash2 draft model is grafted
-verbatim, and an indexed 131,072-row proposal head gathered from the NVIDIA
-output head enables `--lm-head-draft`. The HF page carries the full creation
-outline and the conversion report.
-
-Configuration used for running it (single 32 GB GPU — stop any other resident model
-first):
-
-```bat
-ninfer-serve.exe "E:\NInfer-Deploy-V3\qwen3_8_27b_nvfp4-nvidia.ninfer" --host 127.0.0.1 --port 8080 --max-context 240000 --max-concurrency 2 --spec dflash2 --draft-tokens 7 --lm-head-draft --ngram-draft-tokens 15 --ngram-min-match 12 --kv-dtype int8 --preserve-thinking --host-cache-mib 52000 --pending-timeout-ms 900000 --prefill-chunk 4096 --kv-capacity auto --kv-headroom-mib 0 --log-colours on --ngram-archive-mib 2048 --ngram-session-mib 256 --ngram-native-sessions --cuda-graph-allowance-mib 500 --request-log-jsonl log.json --default-thinking-budget 16384 --thinking-budget-message "Considering the limited time available to the user, I must stop thinking now. Time to act:" --tolerant-tool-calls
-```
-
-This is the current `LaunchQwen3.8-27B-nvidia-dflash2-ngram.bat` launch configuration, with the
-retention tier in its single-knob form: the default hybrid prefix cache shares the 52,000 MiB
-budget between KV blocks and state snapshots by eviction value. With `--use-original-prefix-caching`
-the same budget resolves, at `--max-concurrency 2`, to 139 Host StateImages of 195,897,344 B — 31
-long anchors per continuation — with the remaining ≈26,000 MiB given to Host KV; the `server_start`
-memory ledger reports the resolved split.
+Both are single-file `.ninfer` artifacts for an RTX 5090 (`sm_120a`); each Hugging Face page has
+the creation outline and conversion report. The [Quick start](#quick-start-windows) launch works
+for either.
 
 ## Thanks
 
