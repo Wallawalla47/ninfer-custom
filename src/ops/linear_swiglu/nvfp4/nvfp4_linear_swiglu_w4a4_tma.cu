@@ -90,10 +90,9 @@ void launch_nvfp4_linear_swiglu_w4a4_tma(const std::uint8_t* activation_codes,
                     (tokens + M256N128S3::kBlockM - 1) / M256N128S3::kBlockM);
 #ifdef _WIN32
     // MSVC cannot pass the over-aligned (alignas(128)) CUtensorMap struct by value as a
-    // __grid_constant__ parameter, so the descriptors are staged into the shared ring's device
-    // buffer (core/tma_descriptor_staging.h holds the ring design and the single-thread,
-    // single-compute-stream invariants it relies on); the kernel reads them there and makes
-    // them visible to the TMA (tensormap) proxy with a fence.proxy.tensormap acquire.
+    // __grid_constant__ parameter, so a staging kernel stores the descriptors into the shared
+    // device buffer (core/tma_descriptor_staging.cuh holds the design and its invariants); the
+    // kernel reads them there and acquires each tensor map for the TMA (tensormap) proxy.
     nvfp4_linear_swiglu_w4a4_tma_kernel<Geometry, M256N128S3>
         <<<grid, M256N128S3::kThreads, kSharedBytes, stream>>>(
             tma_descriptor_staging().stage(descriptors, stream), alpha, output, tokens);

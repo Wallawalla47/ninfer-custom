@@ -1,15 +1,15 @@
 // A focused regression test for the Windows-only NVFP4 W4A4 TMA descriptor-staging race.
 //
-// The Windows staging path copies the over-aligned CUtensorMap descriptor struct from a pinned
-// host buffer into a persistent device buffer with cudaMemcpyAsync, which reads the pinned
-// source asynchronously on the GPU. With a single pinned source the host can overwrite it before
-// the previous async copy has been read, so a launch's kernel then computes against a foreign
-// weight. This harness fires the TMA route back-to-back (no inter-launch sync) with distinct
-// weights and compares every launch against an isolated (synced) reference: any divergence means
-// a launch read a stale or foreign descriptor. It covers both staging sites: the plain Linear
-// TMA (launch_tma) and the fused LinearSwiGLU TMA.
+// The Windows staging path stores the over-aligned CUtensorMap descriptor struct into one
+// persistent device buffer that every launch reuses (core/tma_descriptor_staging.cuh). A launch
+// that reads another launch's descriptors (staged too early, too late, or a stale tensor map in
+// the TMA proxy) computes against a foreign weight. This harness fires the TMA route
+// back-to-back (no inter-launch sync) with distinct weights and compares every launch against an
+// isolated (synced) reference: any divergence means a launch read a stale or foreign descriptor.
+// It covers both staging sites: the plain Linear TMA (launch_tma) and the fused LinearSwiGLU TMA.
 
 #include "core/arena.h"
+#include "core/decode_graph.h"
 #include "core/device.h"
 #include "core/tensor.h"
 #include "core/weight.h"
@@ -26,6 +26,7 @@
 #include <exception>
 #include <iostream>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -59,49 +60,83 @@ std::vector<std::uint16_t> make_activation(std::int32_t k, std::int32_t tokens,
 }
 
 // Fire `launches` isolated launches (synchronizing after each) to obtain per-weight reference
-// outputs, then fire `launches` back-to-back launches (no inter-launch sync), then bit-exact
-// compare. `launch(i, output_device)` enqueues exactly one op call for weight i into
+// outputs, then fire `launches` back-to-back launches (no inter-launch sync), then replay each
+// launch from a captured CUDA Graph, and bit-exact compare both against the references.
+// `launch(i, output_device, stream)` enqueues exactly one op call for weight i into
 // output_device. The kernels are deterministic for fixed inputs, so a correct run reproduces the
 // reference exactly; a staging race feeds a launch a foreign weight and the outputs diverge.
 template <typename Launch>
 int run_staging_race(std::string_view label, std::int32_t launches, std::int32_t tokens,
                      std::size_t output_elements, Launch launch) {
-    std::vector<DeviceBuffer> reference(launches), raced(launches);
+    const std::size_t output_bytes = output_elements * sizeof(std::uint16_t);
+    std::vector<DeviceBuffer> reference(launches), raced(launches), replayed(launches);
     for (std::int32_t i = 0; i < launches; ++i) {
-        reference[i] = DeviceBuffer(output_elements * sizeof(std::uint16_t));
-        raced[i]     = DeviceBuffer(output_elements * sizeof(std::uint16_t));
+        reference[i] = DeviceBuffer(output_bytes);
+        raced[i]     = DeviceBuffer(output_bytes);
+        replayed[i]  = DeviceBuffer(output_bytes);
     }
-    std::vector<std::uint16_t> bits(output_elements);
+    DeviceBuffer scratch(output_bytes);
     cuda_check(cudaStreamSynchronize(nullptr), "idle before reference phase");
     for (std::int32_t i = 0; i < launches; ++i) {
-        launch(i, reference[i].p);
+        launch(i, reference[i].p, nullptr);
         cuda_check(cudaStreamSynchronize(nullptr), "synchronize reference launch");
     }
-    // Back-to-back: the host enqueues every staging copy and kernel before the GPU has read the
-    // earlier ones, so a single pinned source would be overwritten mid-flight.
+    // Back-to-back: the host enqueues every launch before the GPU has run the earlier ones, so
+    // staging that reads host memory after the host moved on feeds a launch foreign descriptors.
     for (std::int32_t i = 0; i < launches; ++i) {
-        launch(i, raced[i].p);
+        launch(i, raced[i].p, nullptr);
     }
     cuda_check(cudaStreamSynchronize(nullptr), "synchronize raced launches");
-    long long total_divergent = 0;
+
+    // Captured: each launch is captured into its own graph, more eager launches than any
+    // host-side staging state holds follow, and every graph then replays right after a foreign
+    // launch has restaged the shared descriptor buffer. A replay must use the descriptors it was
+    // captured with, whatever the host and the buffer held since.
+    cudaStream_t stream = nullptr;
+    cuda_check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "create capture stream");
+    std::vector<DecodeGraphDefinition> definitions(launches);
+    std::vector<DecodeGraphExecutable> graphs(launches);
     for (std::int32_t i = 0; i < launches; ++i) {
-        cuda_check(cudaMemcpy(bits.data(), reference[i].p, output_elements * sizeof(std::uint16_t),
-                              cudaMemcpyDeviceToHost),
-                   "copy reference output");
-        const std::vector<std::uint16_t> reference_bits(bits.begin(), bits.end());
-        cuda_check(cudaMemcpy(bits.data(), raced[i].p, output_elements * sizeof(std::uint16_t),
-                              cudaMemcpyDeviceToHost),
-                   "copy raced output");
+        definitions[i].capture(stream, [&] { launch(i, replayed[i].p, stream); });
+        graphs[i].instantiate(definitions[i]);
+    }
+    constexpr std::int32_t kRestagings = 48;
+    for (std::int32_t round = 0; round < kRestagings; ++round) {
+        launch(round % launches, scratch.p, stream);
+    }
+    for (std::int32_t i = 0; i < launches; ++i) {
+        launch((i + 1) % launches, scratch.p, stream);
+        graphs[i].launch(stream);
+    }
+    cuda_check(cudaStreamSynchronize(stream), "synchronize graph replays");
+    cuda_check(cudaStreamDestroy(stream), "destroy capture stream");
+
+    std::vector<std::uint16_t> reference_bits(output_elements), bits(output_elements);
+    const auto divergence = [&](const DeviceBuffer& output) {
+        cuda_check(cudaMemcpy(bits.data(), output.p, output_bytes, cudaMemcpyDeviceToHost),
+                   "copy output");
         long long divergent = 0;
         for (std::size_t j = 0; j < output_elements; ++j) {
             if (bits[j] != reference_bits[j]) { ++divergent; }
         }
-        if (divergent != 0) {
-            std::cerr << label << " T=" << tokens << " launch=" << i << ": " << divergent << '/'
-                      << output_elements << " output elements diverged from the isolated "
-                         "reference\n";
+        return divergent;
+    };
+    long long total_divergent = 0;
+    for (std::int32_t i = 0; i < launches; ++i) {
+        cuda_check(cudaMemcpy(reference_bits.data(), reference[i].p, output_bytes,
+                              cudaMemcpyDeviceToHost),
+                   "copy reference output");
+        for (const auto& [phase, output] :
+             {std::pair<std::string_view, const DeviceBuffer*>{"back-to-back", &raced[i]},
+              std::pair<std::string_view, const DeviceBuffer*>{"graph replay", &replayed[i]}}) {
+            const long long divergent = divergence(*output);
+            if (divergent != 0) {
+                std::cerr << label << " T=" << tokens << " launch=" << i << " (" << phase
+                          << "): " << divergent << '/' << output_elements
+                          << " output elements diverged from the isolated reference\n";
+            }
+            total_divergent += divergent;
         }
-        total_divergent += divergent;
     }
     return total_divergent == 0 ? 0 : 1;
 }
@@ -128,11 +163,11 @@ int run_linear_race() {
     return run_staging_race(
         "NVFP4 Linear TMA staging", kLaunch, kTokens,
         static_cast<std::size_t>(kN) * kTokens,
-        [&](std::int32_t i, void* output) {
+        [&](std::int32_t i, void* output, cudaStream_t stream) {
             const Weight weight = host_weights[i].device_weight(device_weights[i].p);
             Tensor destination(output, DType::BF16, {kN, kTokens});
             ops::linear(input, weight, destination, ops::LinearPolicy::AllowA4, workspace,
-                        nullptr);
+                        stream);
         });
 }
 
@@ -159,11 +194,11 @@ int run_swiglu_race() {
     return run_staging_race(
         "NVFP4 LinearSwiGLU TMA staging", kLaunch, kTokens,
         static_cast<std::size_t>(kOutput) * kTokens,
-        [&](std::int32_t i, void* output) {
+        [&](std::int32_t i, void* output, cudaStream_t stream) {
             const Weight weight = host_weights[i].device_weight(device_weights[i].p);
             Tensor destination(output, DType::BF16, {kOutput, kTokens});
             ops::linear_swiglu(input, weight, destination, ops::LinearPolicy::AllowA4, workspace,
-                               nullptr);
+                               stream);
         });
 }
 } // namespace

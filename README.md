@@ -614,7 +614,8 @@ RTX 5090:
 
 - **Native Windows build and run** with MSVC and CUDA: static CUDA runtime, FFmpeg/curl from vcpkg
   with their DLLs copied next to the executables, and workarounds for MSVC limits (non-RDC NVFP4
-  kernels, TMA descriptors passed through pinned buffers, Windows file-mapping rules).
+  kernels, TMA descriptors stored into device memory by a staging kernel, Windows file-mapping
+  rules).
 - **PNG images in the vision path.** The prebuilt vcpkg FFmpeg has no PNG decoder, so a built-in
   PNG decoder (`NINFER_MEDIA_NATIVE_PNG`) was added.
 - **Converter recipe paths with drive letters.** In `--recipe FILE[:function]`, a colon inside

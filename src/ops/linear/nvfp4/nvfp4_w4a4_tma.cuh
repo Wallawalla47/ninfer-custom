@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/tma_descriptor_staging.h"
+#include "core/tma_descriptor_staging.cuh"
 #include "ops/common/mbarrier.cuh"
 #include "ops/common/memory.cuh"
 #include "ops/common/mma.cuh"
@@ -95,9 +95,9 @@ Nvfp4W4a4TmaDescriptors make_nvfp4_w4a4_tma_descriptors(
     return descriptors;
 }
 
-// The single Windows staging ring for Nvfp4W4a4TmaDescriptors, shared by every W4A4 TMA launch
-// route (linear, attention, GDN, linear-add, LinearSwiGLU). See tma_descriptor_staging.h for
-// the invariants the shared ring and device buffer rely on.
+// The single Windows descriptor staging for Nvfp4W4a4TmaDescriptors, shared by every W4A4 TMA
+// launch route (linear, attention, GDN, linear-add, LinearSwiGLU). See tma_descriptor_staging.cuh
+// for the invariants its device buffer relies on.
 inline TmaDescriptorStaging<Nvfp4W4a4TmaDescriptors>& tma_descriptor_staging() {
     static TmaDescriptorStaging<Nvfp4W4a4TmaDescriptors> staging;
     return staging;
@@ -196,7 +196,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_w4a4
 #ifdef _WIN32
     // MSVC cannot pass the over-aligned (alignas(128)) CUtensorMap struct by value as a
     // __grid_constant__ parameter (C2719), so on Windows the descriptors are pointer-passed: the
-    // launcher stages them into a stream-owned device buffer and this kernel reads them from
+    // launcher's staging kernel stores them into a device buffer and this kernel reads them from
     // global memory. The epilogue/output keep ordinary by-value passing because a grid-constant
     // struct holding a sub-8-byte member (the contiguous output's int32 stride) mis-packs.
     const Nvfp4W4a4TmaDescriptors* descriptors_pointer, float alpha, const Epilogue epilogue,
@@ -220,11 +220,11 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_w4a4
     const int row_begin   = block_x * Schedule::kBlockN;
 
 #ifdef _WIN32
-    // The descriptors are staged into a stream-owned device buffer by the launcher (global
+    // The descriptors are stored into a device buffer by the launcher's staging kernel (global
     // memory). On the non-Windows path they are __grid_constant__ (constant memory), which the
-    // TMA (tensormap) proxy reads coherently for free; a global-memory tensormap written by the
-    // generic proxy (the launcher's cudaMemcpy) is not, until it is made visible. The producer
-    // (thread 0) issues the acquire once, before its first cp.async.bulk.tensor.
+    // TMA (tensormap) proxy reads coherently for free; a global-memory tensor map written by the
+    // generic proxy is not, until it is acquired. The producer (thread 0) acquires each map once,
+    // before its first cp.async.bulk.tensor.
     const Nvfp4W4a4TmaDescriptors& descriptors = *descriptors_pointer;
 #endif
 
@@ -246,16 +246,12 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void nvfp4_w4a4
         }
         if (threadIdx.x == 0) {
 #ifdef _WIN32
-            // The descriptors are staged into global memory by the launcher (written by the
-            // generic proxy via cudaMemcpy); make them visible to the TMA (tensormap) proxy
-            // before the first cp.async.bulk.tensor. The non-Windows __grid_constant__ path is
-            // in constant memory, which the tensormap proxy reads coherently for free.
-            constexpr int kDescriptorWords =
-                static_cast<int>(sizeof(Nvfp4W4a4TmaDescriptors) / sizeof(std::uint32_t));
-            asm volatile("fence.proxy.tensormap::generic.acquire.sys [%0], %1;"
-                         :
-                         : "l"(descriptors_pointer), "n"(kDescriptorWords)
-                         : "memory");
+            // Each 128-byte tensor map needs its own acquire: the fence covers only the map at
+            // its address, and the buffer's address repeats with new contents every launch.
+            acquire_staged_tensor_map(&descriptors.a_codes);
+            acquire_staged_tensor_map(&descriptors.b_codes);
+            acquire_staged_tensor_map(&descriptors.a_scales);
+            acquire_staged_tensor_map(&descriptors.b_scales);
             // The activation codes/scales are produced by the quantize kernel (generic proxy);
             // make those global writes visible to the TMA (async) proxy that reads them.
             asm volatile("fence.proxy.async.global;" : : : "memory");

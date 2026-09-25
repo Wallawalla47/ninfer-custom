@@ -74,8 +74,9 @@ __global__ __launch_bounds__(
     const int pair_begin  = block_x * kPairN;
 
 #ifdef _WIN32
-    // The descriptors are staged into a stream-owned device buffer by the launcher; the TMA proxy
-    // reads them directly, so no per-CTA tensormap fence is required.
+    // The descriptors are stored into a device buffer by the launcher's staging kernel through
+    // the generic proxy; the producer acquires each tensor map for the TMA proxy before its first
+    // cp.async.bulk.tensor (core/tma_descriptor_staging.cuh).
     const Nvfp4W4a4TmaDescriptors& descriptors = *descriptors_pointer;
 #endif
 
@@ -96,6 +97,12 @@ __global__ __launch_bounds__(
             asm volatile("setmaxnreg.dec.sync.aligned.u32 40;" : : : "memory");
         }
         if (threadIdx.x == 0) {
+#ifdef _WIN32
+            acquire_staged_tensor_map(&descriptors.a_codes);
+            acquire_staged_tensor_map(&descriptors.b_codes);
+            acquire_staged_tensor_map(&descriptors.a_scales);
+            acquire_staged_tensor_map(&descriptors.b_scales);
+#endif
 #pragma unroll 1
             for (int k_tile = 0; k_tile < kKTiles; ++k_tile) {
                 const int stage                 = k_tile % Schedule::kStages;
