@@ -15,8 +15,8 @@ for creating NInfer!
 1. includes changes allowing it to be built and run on Windows
 2. includes a new alternative prefix caching system designed and implemented by Claude Opus 5.5 as
    the default. You also simply set an amount of system RAM to be used for prefix caching with
-   `--host-cache-mib N`. This is the best option and has proved to be quite a bit more effective
-   than the prefix caching currently in upstream NInfer. It can also be combined with
+   `--host-cache-mib N`. This option seems to work fantastically well and seems much more
+   effective than the prefix caching currently in upstream NInfer. It can also be combined with
    `--prefix-cache-file PATH` to load/store the prefix cache to a file on start/close. You do need
    to close with Ctrl+C rather than closing the cmd window, as Windows does not necessarily allow
    enough time post-window close to dump a large prefix cache to a file
@@ -37,23 +37,29 @@ for creating NInfer!
    ([iamwavecut](https://github.com/iamwavecut))
 8. enables the use of YaRN context extension for scaling context up to 1m tokens (by specifying
    `--rope-yarn-factor F`, where F is a number from 1 to 4)
-9. allows the user to specify a custom thinking budget message (by specifying
-   `--default-thinking-budget N` and `--thinking-budget-message S`, where N is the budget of
-   thinking tokens and S is the thinking budget message specified in double quotes “”)
-10. includes various improvements (mostly sourced from others credited below) to fix some Qwen tool
+9. fixes the CUDA graph allowance which, depending on the speculative decoding method used,
+   sometimes took up much more VRAM than would ever be required
+10. allows the user to shrink the default 1024MiB VRAM headroom left available after KV cache when
+    using `--kv-capacity auto`, by specifying a custom headroom value with `--vram-headroom-mib N`,
+    where N is the number of MiB to leave available
+11. allows the user to specify a custom thinking budget message (by specifying
+    `--default-thinking-budget N` and `--thinking-budget-message S`, where N is the budget of
+    thinking tokens and S is the thinking budget message specified in double quotes “”)
+12. includes various improvements (mostly sourced from others credited below) to fix some Qwen tool
     calling issues and leaking thinking tokens etc. Use the launch parameter
     `--tolerant-tool-calls` to fix some broken tool calls
-11. accepts more tool-call formats and API options used by agent clients such as Claude Code, Qwen
+13. accepts more tool-call formats and API options used by agent clients such as Claude Code, Qwen
     Code, Codex and Zed (again mostly based on the work of others credited below)
-12. makes improvements to the console logging including an option to turn on colourful logging
+14. makes improvements to the console logging including an option to turn on colourful logging
     which allows for easier visual tracking of particular figures as the log progresses
     (`--log-colours on`) and some average statistics shown at the bottom of the console view
     (which can be turned off with `--log-stats-panel off`)
-13. has a help screen organised by category
-14. contains various other fixes and improvements (most of which are outlined below), including
+15. has a help screen organised by category
+16. contains various other fixes and improvements (most of which are outlined below), including
     merging in some PRs on the upstream repo.
 
-I recommend using this with the NVIDIA NVFP4 artifact I’ve uploaded here:
+I recommend using this with the NVIDIA NVFP4 artifact I’ve uploaded here, which runs a bit faster
+than the original artifact based on the Unsloth quant and takes up less VRAM:
 <https://huggingface.co/wallawalla47/Qwen3.8-27B-NVIDIA-NVFP4-NInferV3>
 
 ## Quick start (Windows)
@@ -71,7 +77,7 @@ copied next to it. The launch I use on a single 32 GB RTX 5090 (stop any other r
 first):
 
 ```bat
-ninfer-serve.exe qwen3_8_27b_nvfp4-nvidia.ninfer --host 127.0.0.1 --port 8080 --max-context 240000 --max-concurrency 2 --spec dflash2 --draft-tokens 7 --lm-head-draft --ngram-draft-tokens 15 --ngram-min-match 12 --kv-dtype int8 --fast-prefill-kernel --preserve-thinking --host-cache-mib 52000 --pending-timeout-ms 900000 --prefill-chunk 4096 --kv-capacity auto --kv-headroom-mib 0 --log-colours on --ngram-archive-mib 2048 --ngram-session-mib 256 --ngram-native-sessions --request-log-jsonl log.json --default-thinking-budget 16384 --thinking-budget-message "Considering the limited time available to the user, I must stop thinking now. Time to act:" --tolerant-tool-calls
+ninfer-serve.exe qwen3_8_27b_nvfp4-nvidia.ninfer --host 127.0.0.1 --port 8080 --max-context 240000 --max-concurrency 2 --spec dflash2 --draft-tokens 7 --lm-head-draft --ngram-draft-tokens 15 --ngram-min-match 12 --kv-dtype int8 --fast-prefill-kernel --preserve-thinking --host-cache-mib 52000 --pending-timeout-ms 900000 --prefill-chunk 4096 --kv-capacity auto --vram-headroom-mib 0 --log-colours on --ngram-archive-mib 2048 --ngram-session-mib 256 --ngram-native-sessions --request-log-jsonl log.json --default-thinking-budget 16384 --thinking-budget-message "Considering the limited time available to the user, I must stop thinking now. Time to act:" --tolerant-tool-calls
 ```
 
 Add `--prefix-cache-file PATH` to keep the prefix cache across restarts (stop the server with
@@ -100,13 +106,13 @@ Settings:
   for the prefix cache. The hybrid-cache arm was then selected with `--use-alt-prefix-caching`;
   today it is the default and the original-cache arm needs `--use-original-prefix-caching`. The
   run also passed `--cuda-graph-allowance-mib 500`, an option since removed now that the
-  allowance is measured.
+  allowance is measured, and `--vram-headroom-mib` was then named `--kv-headroom-mib`.
 
   ```text
   --max-context 160000 --max-concurrency 2 --spec dflash2 --draft-tokens 7 --lm-head-draft
   --ngram-draft-tokens 15 --ngram-min-match 12 --kv-dtype int8 --fast-prefill-kernel
   --preserve-thinking --host-cache-mib 52000 --pending-timeout-ms 900000 --prefill-chunk 4096
-  --kv-capacity auto --kv-headroom-mib 0 --ngram-archive-mib 2048 --ngram-session-mib 256
+  --kv-capacity auto --vram-headroom-mib 0 --ngram-archive-mib 2048 --ngram-session-mib 256
   --ngram-native-sessions --default-thinking-budget 16384
   --thinking-budget-message "Considering the limited time available to the user, I must stop
   thinking now. Time to act:" --tolerant-tool-calls
@@ -421,8 +427,11 @@ Against the flag off (Qwen3.8-27B NVIDIA NVFP4, int8 KV): new-prompt prefill +3.
 - **Grouped `--help`** by category on `ninfer-serve` and the `ninfer` CLI, covering flags that
   were previously undocumented, with separate sections for the two prefix caching systems. The CLI
   statistics are coloured too.
-- **`--kv-headroom-mib`** sets how much GPU memory automatic KV sizing leaves spare (upstream
-  always leaves 1 GiB).
+- **`--vram-headroom-mib N`** sets how much GPU memory `--kv-capacity auto` leaves spare after
+  sizing the KV pool (upstream always leaves 1 GiB).
+- **Engine messages are ordinary log records** (`engine | ...`) that scroll above the statistics
+  panel. Routine ones, such as a Device KV lease that grew by releasing retained cache, are `debug`
+  and appear only with `--log-level debug`; warnings and errors always appear.
 - **Measured CUDA Graph allowance**: the KV sizing reserves 64 MiB plus 4 MiB per decode-graph
   executable, measured on an RTX 5090 across every speculative mode and concurrency (DFlash2 with
   ngram drafting at `--max-concurrency 2` reserves 160 MiB and uses about 62 MiB, where upstream's
