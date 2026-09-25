@@ -18,6 +18,8 @@ upstream README follows, copied unchanged, under the "Upstream README" heading.
   conversations by content and keeps it in GPU memory, host RAM and optionally on disk (outlined
   just below);
 - lets ngram copy drafting run with more than one concurrent request;
+- decodes about 2-2.5 % faster per speculative round, with the same output, by overlapping each
+  decode kernel's launch and weight loading with the kernel before it;
 - accepts more tool-call formats and API options used by agent clients such as Claude Code, Qwen
   Code, Codex and Zed;
 - builds and runs natively on Windows;
@@ -390,6 +392,37 @@ RTX 5090:
 
 ### Other speed changes
 
+- **Faster speculative decode rounds.** Output is unchanged token for token; only the time per round
+  changes.
+  - Kernels in the decode CUDA Graph launch as programmatic dependents of the kernel before them
+    (PDL). Weight-streaming kernels (the NVFP4/FP8 projections, the drafter's Q8/Q4 projections,
+    the GDN record step) load their first weight tiles while the previous kernel is still running,
+    and let the next kernel launch only after their own main loop, so the two never compete for
+    memory bandwidth. A 28-byte memset in the proposal head's top-k, which cost about 70 us of idle
+    GPU per round on Windows, is now a kernel.
+  - After each round the engine no longer waits for the recurrent-state fold before preparing the
+    next round, except when a finishing request still needs its input buffer.
+  - Measured on Qwen3.8-27B NVIDIA NVFP4, DFlash2 K=7, INT8 KV, RTX 5090:
+
+    | Measurement | Before | After | Change |
+    |---|---:|---:|---:|
+    | `ninfer_bench` greedy decode, 16K context (ms per round) | 16.79 | 16.39 | -2.4 % |
+    | `ninfer_bench` greedy decode, 16K context (decode tok/s) | 391.0 | 400.6 | +2.5 % |
+    | `ninfer_bench` greedy decode, 60K context (ms per round) | 18.00 | 17.61 | -2.2 % |
+    | `ninfer_bench` greedy decode, 60K context (decode tok/s) | 346.9 | 354.6 | +2.2 % |
+    | Served coding prompts, production thinking sampling, same seeds (output tok/s) | 208.1 | 213.7 | +2.7 % |
+
+    The `ninfer_bench` rows are 9 repetitions per arm, interleaved, with identical round and
+    acceptance counts in both builds (standard deviation at most 0.01 ms).
+
+    Both builds produced byte-identical greedy text through `ninfer-serve` with DFlash2 + ngram,
+    MTP and no speculation, and the same 141,575 sampled tokens in the served run. On the
+    closed-loop agentic A/B (`bench/agentic_ab`) the time per single-request decode round fell by
+    about 2 %; its headline output rates move by 5-10 % between runs with sampled content alone,
+    so they cannot resolve a change this size.
+  - Tried and not kept (details in [`RESEARCH_NOTES.md`](RESEARCH_NOTES.md)): a fused NVFP4 RMSNorm +
+    SwiGLU + down MLP (0.3 % faster alone, 0.7 % slower together with PDL), and restricting or
+    sharpening the DFlash2 proposal distribution (no gain in acceptance).
 - **Ngram copy drafting with more than one concurrent request.** Ngram drafting proposes the next
   tokens by copying matching text from earlier in the context, alongside MTP/DFlash/DFlash2. The
   single-request version is the original work of [remesis](https://github.com/remesis) in the

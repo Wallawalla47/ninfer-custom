@@ -121,3 +121,91 @@ The three candidates' minimal patches, their per-configuration measured table an
 logs are kept with the review bundle under `profiles/bench/input_proj_r7_review/data/prototypes/`. The
 measured prototype sources were reverted before the final build and are not retained; that directory's
 README marks the patches as reconstructions and lists which trial-build artifacts do still exist.
+
+## Decode-round measurement setup (perf/decode-round-overheads)
+
+The two entries below were measured on the RTX 5090 with the NVIDIA ModelOpt Qwen3.8-27B artifact
+(`qwen3_8_27b_nvfp4-nvidia.ninfer`: NVFP4 MLP, FP8 attention/GDN projections), DFlash2 K=7 with the
+optimized proposal head, INT8 KV, CUDA 13.4, Windows WDDM. The **controlled** numbers are
+`ninfer_bench -pg 16384,256` and `-pg 60000,256` with greedy decoding, so every arm decodes the same
+token stream (identical round and acceptance counts in every run); each value is the mean of 6-9
+repetitions from arms interleaved in one window, standard deviation below 0.02 ms. The candidates were
+selected per process from one binary (commit `f2c991d0` on branch `perf/decode-round-overheads`, not
+merged; it holds every candidate below behind `NINFER_AB_ITEMS`) so arms differ only in the item. Kernel
+attributions come from Nsight Systems `--cuda-graph-trace=node` captures of one 128-token decode at
+16K context, compared kernel by kernel as the interval between consecutive kernel end times.
+
+## Programmatic dependent launch with an entry-time trigger (replaced)
+
+The first PDL form had every decode-path kernel call `griddepcontrol.launch_dependents` at entry,
+then wait, and hinted the first four K phases of each FP8 SIMT warp's weight rows into L2 before the
+wait. It was correct (byte-identical greedy output) and **10.4 % slower per round at 16K, 9.4 % at
+60K**. The profile showed kernel lifetimes overlapping heavily (50 ms of summed kernel time in an
+18.4 ms round) and the loss concentrated in bandwidth-bound kernels whose successors had launched
+early: the 80-CTA NVFP4 down projection (+1.25 ms per round, 37 -> 57 us each), the FP8 out
+projection (+0.32 ms), the GDN record kernel (+0.16 ms) and attention (+0.10 ms). With an entry
+trigger the next kernels cascade onto the SMs the running grid leaves idle and issue their weight
+loads and L2 prefetches while it is still streaming, so they compete for its bandwidth rather than
+fill idle time.
+
+The adopted form triggers dependents after the main loop of every streaming kernel (NVFP4/FP8/Q8/Q4
+GEMMs, GDN record, drafter sliding-window attention and convolution prepare) and keeps the entry
+trigger only for short kernels. It measured 2.5 % faster at 16K and 2.3 % at 60K. Two further
+variants were measured on that form and not kept: launching KV-cache attention as a dependent (0.5 %
+slower at 16K, equal at 60K; it has no weights to stage) and a two-phase L2 prefetch in the FP8 SIMT
+kernel before the wait (no measurable change against removing it).
+
+## Fused NVFP4 RMSNorm + SwiGLU MLP + down (not routed)
+
+A fused Op computed `residual += down(SwiGLU(gate_up(RMSNorm(residual))))` for the NVFP4 AllowA4
+route at T=5..128: one kernel for Offset RMSNorm plus NVFP4 activation quantization (the D=5120
+RMSNorm launcher's reduction order, reused from the fused attention-input route), the W4A4 gate/up
+MMA with an epilogue that wrote the down projection's NVFP4 codes and scales directly (16-row groups,
+the same `quantize_nvfp4_k16` arithmetic), and the unchanged down MMA reading that plane. It was
+byte-identical to the unfused composition at every tested T (5..128, eager and graph).
+
+| Arm (controlled, ms/round) | 16K | 60K |
+|---|---:|---:|
+| without PDL: fusion vs master | -0.36 % | -0.32 % |
+| with PDL: fusion + PDL vs PDL alone | +0.7 % | +0.7 % |
+
+Without PDL the fusion removes two small launches per layer. With PDL those kernels already overlap
+the neighbouring GEMMs' weight staging, and the fusion only lengthens the serial path: the fused
+norm/quantize kernel (8 CTAs, 3.4 us) cost 218 us per round against 196 us for the separate norm and
+quantize, and the quantizing epilogue added 103 us to the gate/up MMA against 80 us for the quantize
+kernel it replaced, plus about 60 us across the following GEMMs. It was removed with PDL adopted; the
+measured source is commit `f2c991d0`.
+
+## DFlash2 proposal filtered by the request's top_k / min_p / top_p (not adopted)
+
+The DFlash2 candidate selector draws each proposal from `softmax(edge / temperature)` over its 16
+candidates. The candidate restricted that distribution exactly as the target sampler restricts its
+own candidates (top_k, then min_p against the best weight, then the shortest top_p prefix of the
+pre-truncation weight), renormalized it, and retained the restricted q for acceptance, so target
+sampling stayed exact. It passed an FP64 oracle for the filtered q and draw.
+
+Open-loop controlled test (production thinking sampling: temperature 1.0, top_k 20, top_p 0.95;
+DFlash2 K=7 plus ngram 15/12, INT8 KV, one lane; 16 coding prompts x 2 seeds x 1536 output tokens
+per arm, three rounds with the arm order alternated, 96 requests and about 140K tokens per arm):
+
+| Arm | Output tok/s | Tokens per round | Neural acceptance |
+|---|---:|---:|---:|
+| master proposal | 208.1 | 3.358 | 33.19 % |
+| filtered proposal | 206.5 | 3.331 | 32.91 % |
+
+The per-round paired acceptance differences were +0.37, -0.26 and -0.99 points. The draft's own
+top_p tail over 16 candidates carries little mass, so trimming it barely moves q toward the target
+distribution. A closed-loop agentic pair had shown +2.0 points; its control arm produced 25 % less
+text and three more cache-accounting request failures, and the controlled test attributes that
+difference to content rather than the filter.
+
+A proposal temperature scale (the draft softmax at `temperature * s`, retained q unchanged in
+meaning) was measured the same way, on the build with the adopted round changes:
+
+| Arm | Output tok/s | Neural acceptance |
+|---|---:|---:|
+| s = 1 (master) | 213.7 | 33.19 % |
+| s = 0.7 | 213.0 | 33.04 % |
+| s = 0.5 | 207.5 | 31.71 % |
+
+Sharpening does not raise acceptance; at 0.5 it lowers it. Neither form was kept.
