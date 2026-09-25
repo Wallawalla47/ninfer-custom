@@ -35,11 +35,57 @@ launch_dependent(const LaunchConfig& launch, void (*kernel)(KernelArgs...), Call
     return cudaLaunchKernelEx(&config, kernel, std::forward<CallArgs>(args)...);
 }
 
+// Whether a launch on this stream becomes a programmatic dependent of the preceding kernel: only
+// while the stream captures a CUDA Graph, so eager launches keep full stream serialization.
+[[nodiscard]] inline bool graph_dependent(cudaStream_t stream) noexcept {
+    cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &status) != cudaSuccess) {
+        (void)cudaGetLastError();
+        return false;
+    }
+    return status == cudaStreamCaptureStatusActive;
+}
+
+// Launches a kernel that implements the consumer protocol below (enter() before touching anything
+// but its immutable weights). Captured launches become programmatic dependents; eager launches are
+// ordinary stream-ordered launches.
+template <class... KernelArgs, class... CallArgs>
+[[nodiscard]] inline cudaError_t
+launch_consumer(const LaunchConfig& launch, void (*kernel)(KernelArgs...), CallArgs&&... args) {
+    if (graph_dependent(launch.stream)) {
+        return launch_dependent(launch, kernel, std::forward<CallArgs>(args)...);
+    }
+    cudaLaunchConfig_t config{};
+    config.gridDim          = launch.grid;
+    config.blockDim         = launch.block;
+    config.dynamicSmemBytes = launch.dynamic_smem_bytes;
+    config.stream           = launch.stream;
+    return cudaLaunchKernelEx(&config, kernel, std::forward<CallArgs>(args)...);
+}
+
 // Every producer CTA must call this at least once or exit. This enables dependent scheduling but
 // does not make producer writes visible to the consumer.
 __device__ __forceinline__ void trigger_dependents() { cudaTriggerProgrammaticLaunchCompletion(); }
 
 // Call on every consumer control path before its first access to producer-dependent data.
 __device__ __forceinline__ void wait_for_dependencies() { cudaGridDependencySynchronize(); }
+
+// Consumer protocol for launch_consumer(). Call one of these in every thread, before any access
+// other than reading immutable weights; a CTA that returns early must still have called it, so
+// completion of this grid implies completion of everything it depends on.
+//
+// enter(): for a short kernel. It lets the next captured kernel begin launching once every CTA of
+// this grid is resident, then waits until the preceding grid has completed and its writes are
+// visible.
+__device__ __forceinline__ void enter() {
+    trigger_dependents();
+    wait_for_dependencies();
+}
+
+// enter_streaming(): for a kernel that streams most of its bytes in a main loop. It only waits;
+// the kernel calls trigger_dependents() once that loop is done, so dependents neither take its
+// SMs nor compete for its bandwidth while it streams. Without that call, dependents launch when
+// its CTAs exit.
+__device__ __forceinline__ void enter_streaming() { wait_for_dependencies(); }
 
 } // namespace ninfer::pdl

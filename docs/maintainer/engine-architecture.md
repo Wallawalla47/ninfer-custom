@@ -434,6 +434,11 @@ Engine 对每行输出进行 Frontend preview，形成 accepted-prefix decision�
 `Program::commit` 或 `Program::abort_pending` 消费整个 batch。Program 同时提交或回滚该 prefix
 对应的 Main/backend KV、recurrent state、RNG 和 speculative state。
 
+投机轮的 recurrent fold 在 commit 中入队到 Program stream 后即返回，不等待设备完成：之后读写该 state
+的 decode、capture、transfer 与 prefill 都在同一 stream 上排在它之后，host 不读取 fold 的结果。只有
+terminal DFlash 行经 pinned ingress 追加 context 时才在 commit 内同步，因为下一轮提交会改写该 ingress。
+fold 的设备错误在下一次同步时作为执行失败报告。
+
 非取消行遵循：
 
 ```text

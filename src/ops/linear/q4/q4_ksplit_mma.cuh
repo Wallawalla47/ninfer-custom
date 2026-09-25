@@ -14,6 +14,7 @@
 // shared-memory limit.
 
 #include "ops/common/mma.cuh"
+#include "core/pdl.cuh"
 #include "ops/common/memory.cuh"
 
 #include <cuda_bf16.h>
@@ -192,6 +193,7 @@ __launch_bounds__(Q4KSplitMmaSchedule::kThreads, q4_ksplit_min_blocks_per_sm<Til
     float acc[kNt][4]   = {};
 
     stage_weight(0, shared.staging[0]);
+    pdl::enter_streaming();
     stage_x(0, shared.staging[0]);
     cp_commit();
 
@@ -265,6 +267,7 @@ __launch_bounds__(Q4KSplitMmaSchedule::kThreads, q4_ksplit_min_blocks_per_sm<Til
         }
     }
 
+    pdl::trigger_dependents();
     __syncthreads();
     auto* partial = shared.partial;
     if ((k_split & 1) != 0) {
