@@ -92,46 +92,72 @@ in the [hybrid prefix cache spec](docs/maintainer/hybrid-prefix-cache-spec.md).
 ### Three-way agentic A/B (September 2026)
 
 The closed-loop agentic suite in [`bench/agentic_ab/`](bench/agentic_ab/README.md) replays three
-interleaved coding-agent sessions plus eight subagents: 115 requests with fan-outs, compaction,
-retries and an abort, prompts of 25K-130K tokens and thinking on. Each arm's own answers are fed
-back as an agent client does. All three arms served the official Qwen3.8-27B NVFP4 artifact on an
-RTX 5090 with the production launch flags (DFlash2 + ngram drafting, `--max-concurrency 2`, int8 KV,
-52 GB host cache) at `--max-context 160000`, the largest context the upstream build starts with.
+coding-agent sessions plus eleven subagents: 130 requests with fan-outs, a concurrent subagent
+pair, compaction, retries, an abort and a solo wrap-up, prompts of 25K-135K tokens and thinking
+on. Each arm's own answers are fed back as an agent client does, and the three main sessions take
+their turns in lock-step rounds, so every build meets the same order of session turns whatever
+its speed. It ran on three workload seeds, each replaying different observations. All three arms
+served the official Qwen3.8-27B NVFP4 artifact on an RTX 5090 with the production launch flags
+(DFlash2 + ngram drafting, `--max-concurrency 2`, int8 KV, 52 GB host cache) and production
+sampling (temperature 1.0, top_p 0.95, top_k 20) at `--max-context 160000`, the largest context
+the upstream build starts with.
 
 - **Upstream + Windows port:** upstream at the commit this fork merged, plus only the Windows port
-  (build `96da12bb`), given the same host RAM split as the default cache.
-- **master:** this fork with the default prefix cache and `--fast-prefill-kernel`.
+  (build `96da12bb`), given the same host RAM split as the default cache. It has no ngram drafting.
+- **master:** this fork at `e36f7ee0` with the default prefix cache and `--fast-prefill-kernel`.
 - **master + alt cache:** the same build with `--use-alt-prefix-caching` added.
+
+Each cell is the mean over the three seeds with the lowest and highest seed in brackets; the
+changes are computed per seed against that seed's upstream run.
 
 | Metric | Upstream + Windows port | master | master + alt cache |
 |---|---|---|---|
-| Average time to first token (s) | 19.1 | 8.6 (−55 %) | 4.2 (−78 %) |
-| Median time to first token (s) | 15.4 | 3.6 (−77 %) | 2.1 (−86 %) |
-| 90th-percentile time to first token (s) | 38.8 | 24.0 (−38 %) | 10.4 (−73 %) |
-| Average TTFT, continuing-session turns (s) | 18.7 | 8.7 (−53 %) | 3.5 (−81 %) |
-| Average TTFT, new long prompts (s) | 15.7 | 11.2 (−29 %) | 10.8 (−31 %) |
-| Prompt tokens served from cache | 68.3 % | 75.0 % | 90.0 % |
-| Prompt tokens prefilled | 1,692,372 | 1,324,217 (−22 %) | 544,810 (−68 %) |
-| Main-session turns that re-prefilled the whole prompt (of 72) | 18 | 11 | 1 |
-| Subagent turns that re-prefilled the whole prompt (of 28) | 19 | 7 | 0 |
-| Prefill tok/s, requests with no cache hit in any arm | 5,139 | 6,126 (+19 %) | 7,309 (+42 %) |
-| Output tok/s while decoding (server, all lanes) | 152 | 197 (+29 %) | 227 (+49 %) |
-| Single-request decode tok/s, same requests decoding alone (median) | 208 | 192 | 203 |
-| Workload wall time (min) | 16.6 | 12.3 (−26 %) | 9.6 (−42 %) |
+| Average time to first token (s) | 15.7 (12.4-19.0) | 7.0 (6.6-7.7), −54 % | 3.3 (3.0-3.5), −78 % |
+| Median time to first token (s) | 10.0 (5.9-14.4) | 2.2 (1.8-2.8), −74 % | 0.8 (0.6-1.0), −90 % |
+| 90th-percentile time to first token (s) | 37.4 (31.9-47.3) | 21.3 (16.4-24.4), −40 % | 8.8 (7.0-9.8), −75 % |
+| Average TTFT, continuing-session turns (s) | 16.4 (12.7-20.1) | 6.9 (6.0-7.7), −57 % | 3.2 (2.9-3.5), −80 % |
+| Average TTFT, new long prompts (s) | 13.2 (12.8-13.6) | 11.9 (10.4-14.3), −10 % | 8.2 (8.1-8.4), −37 % |
+| Prompt tokens served from cache | 67.2 % (65.3-69.2) | 75.1 % (74.4-76.3) | 90.2 % (90.1-90.3) |
+| Prompt tokens prefilled | 1.93M (1.73-2.07) | 1.46M (1.35-1.53), −24 % | 0.56M (0.54-0.57), −71 % |
+| Main-session turns that re-prefilled the whole prompt (of 75) | 15 (10-19) | 11 (10-12) | 1 (1-1) |
+| Subagent turns that re-prefilled the whole prompt (of 37) | 25.7 (24-29) | 2 (1-3) | 0 |
+| Prefill tok/s, requests with no cache hit in any arm | 4,969 (4,765-5,130) | 6,050 (5,890-6,165), +22 % | 7,464 (7,363-7,526), +50 % |
+| Output tok/s, one request decoding | 185 (175-193) | 189 (186-191), +3 % | 209 (188-222), +13 % |
+| Decode rounds/s, one request decoding (engine speed) | 54.1 (53.5-54.6) | 54.0 (53.2-55.2), −0.2 % | 54.8 (54.4-55.3), +1.2 % |
+| Tokens per round, one request decoding (acceptance) | 3.41 (3.26-3.56) | 3.50 (3.45-3.56) | 3.82 (3.44-4.08) |
+| Output tok/s, two requests decoding (combined) | 315 (305-324) | 295 (290-303), −6 % | 314 (304-320), 0 % |
+| Decode rounds/s, two requests decoding (engine speed) | 51.4 (51.3-51.4) | 45.9 (45.0-46.6), −11 % | 47.8 (46.8-48.5), −7 % |
+| Output tok/s, all decoding at the run's own batching | 197 (186-203) | 234 (225-248), +19 % | 253 (247-257), +28 % |
+| Decode rounds that ran two requests | 9.8 % | 38.3 % | 40.5 % |
+| Workload wall time (min) | 21.6 (19.9-23.1) | 18.0 (16.1-19.8), −17 % | 13.6 (12.6-15.1), −37 % |
 
 How to read it:
 
+- Every arm completed every request on every seed. Against upstream, every seed agrees on the
+  direction of the average, median and continuing-session TTFT, cache hits, prefilled tokens and
+  whole-run output. master's TTFT on new long prompts and its count of main-session re-prefills
+  moved either way between seeds. The combined report (`bench/agentic_ab/analyze.py --aggregate`)
+  has every range.
 - TTFT includes queueing: up to seven requests are in flight on two lanes. The average queue wait
-  was 16.3 s / 6.2 s / 3.4 s. Without it, TTFT averaged 2.83 s / 2.40 s / 0.75 s.
-- The prefill-rate row covers the 9 requests that had no cache hit in any arm. With the
-  alternative cache, prefill splits only at its own snapshot points, not at every assistant
-  message's template boundaries.
-- Single-request decode compares only the 7 requests that decoded alone in all three arms, so it
-  is noisy. The other rows cover all 115 requests.
-- One master request failed with a resource-accounting error in the default cache's capture path,
-  also seen in earlier runs before these changes. The other two arms completed every request.
-- Sampled output differs between arms (completion totals 132K / 135K / 131K tokens, about 78 %
-  thinking), so compare repeated runs before attributing small differences.
+  was 12.8 s / 4.7 s / 2.6 s. Without it, TTFT averaged 2.93 s / 2.38 s / 0.72 s.
+- The cache rows now repeat closely: across seeds, master served 74.4-76.3 % of prompt tokens from
+  cache and the alternative cache 90.1-90.3 %. Before the sessions ran in lock-step, two runs of
+  one seed on one master build served 61.6 % and 72.6 %, because a faster or slower turn changed
+  which session's prefix was evicted.
+- Output tok/s is decode tokens per second of the engine's own decode time, so prefill and idle
+  time do not dilute it. It splits into decode rounds/s, the engine's speed, and tokens per round,
+  the speculative acceptance, which moves with what the model happened to write. With one request
+  decoding, the three arms run the same number of rounds per second within about 1 % on average
+  and 2 % on any seed; the differences in output tok/s come from acceptance. The fork's ngram drafting supplied 8-11 % of
+  its output; upstream has none.
+- With two requests decoding, master's rounds were about 11 % slower than upstream's and its
+  combined output 6 % lower; the alternative-cache arm, on the same build, was 7 % slower per
+  round and even on output. Upstream decoded two requests together for only 25-65 s per seed, so
+  its two-request rows rest on little data.
+- The fork's whole-run output rate is higher because it decodes both lanes together in about 40 %
+  of its rounds, upstream in about 10 %.
+- Sampled output differs between arms and seeds (152K-195K completion tokens per run, about 78 %
+  thinking); the seed ranges include that variation.
 
 ### Earlier A/B: default cache vs upstream (September 2026)
 

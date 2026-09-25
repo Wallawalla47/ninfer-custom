@@ -704,9 +704,11 @@ def build_plan(seed=42, scale=1.0):
                    "planner and get the context-cache tests green."})
     fan1 = ["explore-1", "explore-2", "explore-3", "explore-4"]
     fan2 = ["explore-5", "explore-6", "explore-7"]
+    pair = ["survey-1", "survey-2"]
     a_steps = [{"op": "request", "cls": "cold_resume", "obs": None, "delay": 0.0},
                {"op": "signal", "name": "A_resumed"},
-               {"op": "wait", "signal": "C_resumed"}]
+               {"op": "wait", "signal": "C_resumed"},
+               {"op": "lockstep"}]
     a_steps += _loop(c, rng, "engine", n(7), 0, copy_at=(), edit_at=(4,))
     a_steps.append({"op": "spawn", "actors": fan1})
     a_steps.append({"op": "request", "cls": "loop", "obs": _report_obs(c, rng, "engine", fan1),
@@ -720,7 +722,19 @@ def build_plan(seed=42, scale=1.0):
     a_steps.append({"op": "spawn", "actors": fan2})
     a_steps.append({"op": "request", "cls": "loop", "obs": _report_obs(c, rng, "engine", fan2),
                     "delay": 0.2})
+    # The other terminals have finished: session A wraps up alone (last loop, a final review
+    # subagent, the pull-request write-up), so every arm has sustained single-request decoding.
+    a_steps += [{"op": "wait", "signal": "B_done"}, {"op": "wait", "signal": "C_done"}]
     a_steps += _loop(c, rng, "engine", n(6), 300, copy_at=(3,))
+    a_steps.append({"op": "spawn", "actors": ["review-2"]})
+    a_steps.append({"op": "request", "cls": "loop",
+                    "obs": _report_obs(c, rng, "engine", ["review-2"]), "delay": 0.2})
+    a_steps.append({"op": "request", "cls": "loop", "obs": None, "delay": 0.0,
+                    "user": ("Tests are green. Write the pull-request description now: summary, "
+                             "root cause, the fix and why it is correct, the regression test, "
+                             "tests run, and remaining risks. Be thorough (about 1,500 words) "
+                             "and do not call tools."),
+                    "user_delay": rng.uniform(8, 15)})
     actors.append({"name": "A", "persona": "cc", "area": "engine", "initial": a_hist,
                    "steps": a_steps, "top": True})
 
@@ -749,8 +763,14 @@ def build_plan(seed=42, scale=1.0):
     b_steps = [{"op": "wait", "signal": "A_resumed"},
                {"op": "request", "cls": "cold_resume", "obs": None, "delay": 0.0},
                {"op": "signal", "name": "B_resumed"},
-               {"op": "wait", "signal": "C_resumed"}]
+               {"op": "wait", "signal": "C_resumed"},
+               {"op": "lockstep"}]
     b_steps += _loop(c, rng, "python", n(11), 0, copy_at=(8,), extra=b_extra)
+    # Two research subagents at once: their long final reports decode together, so every arm
+    # has sustained two-request decoding for analyze.py to measure.
+    b_steps.append({"op": "spawn", "actors": pair})
+    b_steps.append({"op": "request", "cls": "loop", "obs": _report_obs(c, rng, "python", pair),
+                    "delay": 0.2})
     # The user leaves this terminal while session A compacts and restarts; the session must
     # still be cached when they come back.
     b_steps.append({"op": "wait", "signal": "A_restarted"})
@@ -765,8 +785,16 @@ def build_plan(seed=42, scale=1.0):
     _, _, text, delay = draw_obs(c, rng, "python", kind="read")
     b_steps.append({"op": "request", "cls": "history_edit", "obs": text, "delay": delay})
     b_steps += _loop(c, rng, "python", n(5), 200)
+    b_steps.append({"op": "signal", "name": "B_done"})
     actors.append({"name": "B", "persona": "qc", "area": "python", "initial": b_hist,
                    "steps": b_steps, "top": True})
+    for i, name in enumerate(pair):
+        actors.append(_subagent(c, rng, P, name, "sub", "python",
+                                "Research question %d: in /work/ninfer, find every place the eval "
+                                "tooling %s. Report the exact functions, the file formats involved, "
+                                "and what a resumed run would have to reconstruct."
+                                % (i + 1, ["writes per-item results", "tracks run progress"][i]),
+                                n(4)))
 
     # ---- Session C: third agent (Claude-Code-like persona), tests and docs ----------------
     c_task = ("Write request-log schema tests for the new context-cache fields and document them "
@@ -782,13 +810,20 @@ def build_plan(seed=42, scale=1.0):
                      "delay": 0.2}]}
     c_steps = [{"op": "wait", "signal": "B_resumed"},
                {"op": "request", "cls": "cold_resume", "obs": None, "delay": 0.0},
-               {"op": "signal", "name": "C_resumed"}]
+               {"op": "signal", "name": "C_resumed"},
+               {"op": "lockstep"}]
     c_steps += _loop(c, rng, "tests", n(16), 0, copy_at=(4, 13), extra=c_extra)
+    c_steps.append({"op": "signal", "name": "C_done"})
     actors.append({"name": "C", "persona": "cc", "area": "tests", "initial": c_hist,
                    "steps": c_steps, "top": True})
     actors.append(_subagent(c, rng, P, "review-1", "rev", "tests",
                             "Review the new request-log schema tests for missing boundary cases "
                             "and incorrect assumptions about field presence.", n(4)))
+    actors.append(_subagent(c, rng, P, "review-2", "rev", "engine",
+                            "Review the eviction-planner fix for the dropped host copy: lifetime "
+                            "and ownership of the demoted pages, accounting of the host replica, "
+                            "and whether the regression test would have caught the original bug.",
+                            n(4)))
 
     # Seeds: one per request attempt, identical in both arms; they tag requests in the log.
     seen = set()

@@ -5,20 +5,27 @@ Serves each build in turn on the same GPU with the same model, replays the close
 agentic workload from workload.py against it over the OpenAI chat-completions API, and
 writes a comparison report (analyze.py). Metrics come from each serve's own request log
 (--request-log-jsonl); every request carries a per-request `seed` that is identical in
-both arms, which is how client requests and log records are joined.
+every arm, which is how client requests and log records are joined.
 
 Sequence:
   1. calibrate: the largest --max-context (starting at the launch bat's own value) at which
-     the control serve starts; both arms run at it;
+     the control serve starts; every arm runs at it;
   2. treatment arm: the launch bat's flags plus AB_TREATMENT_EXTRA_FLAGS;
-  3. control arm: the same flags minus those the control's --help does not advertise; the
+  3. optional alt arm: the treatment build and flags plus AB_ALT_EXTRA_FLAGS (default the
+     alternative prefix cache), so one run compares both fork configurations to the control;
+  4. control arm: the same flags minus those the control's --help does not advertise; the
      fork's single --host-cache-mib ceiling is translated into the control's explicit
      --host-state-slots / --host-kv-mib / catalog limits using the split the treatment
-     resolved at startup, so both arms get the same pinned host RAM and catalog sizes;
-  4. analyze.py writes report.md / summary.json into the run directory.
+     resolved at startup, so the arms get the same pinned host RAM and catalog sizes;
+  5. analyze.py writes report.md / summary.json into the run directory. With several --seeds,
+     each seed runs every arm into <out>/seed-<n> in turn, and analyze.py adds a combined
+     report over the seeds in <out>.
 
-Usage: python runner.py [--arms treatment,control] [--ctx N] [--scale F] [--out DIR]
-                        [--dry-run]
+The three main sessions run their turns in lock-step rounds (see Rounds), so every arm meets
+the same order of session turns whatever its speed.
+
+Usage: python runner.py [--arms treatment,alt,control] [--seeds 42,43,44] [--ctx N] [--scale F]
+                        [--out DIR] [--dry-run]
 Paths come from AB_* environment variables (see README.md). The runner never starts or
 stops a production server; stop it before running.
 """
@@ -53,6 +60,8 @@ CONTROL_EXE = os.environ.get("AB_CONTROL_EXE",
 # Fork flags the launch bat does not already carry. --fast-prefill-kernel is in the
 # production (nvidia) launcher and is part of what this A/B measures.
 TREATMENT_EXTRA_FLAGS = os.environ.get("AB_TREATMENT_EXTRA_FLAGS", "--fast-prefill-kernel").split()
+# What the alt arm adds to the treatment's flags (same build).
+ALT_EXTRA_FLAGS = os.environ.get("AB_ALT_EXTRA_FLAGS", "--use-alt-prefix-caching").split()
 HOST = os.environ.get("AB_HOST", "127.0.0.1")
 PORT = int(os.environ.get("AB_PORT", "8080"))
 OUT_ROOT = os.environ.get("AB_OUT", os.path.join(REPO, "profiles", "bench", "agentic_ab"))
@@ -62,6 +71,8 @@ AGENT_MAX_TOKENS = 64000   # what the production clients request on every agent 
 REQUEST_TIMEOUT_S = 1200
 CONTEXT_GUARD_TOKENS = 24000  # keep prompts this far below --max-context
 CREATE_NEW_PROCESS_GROUP = 0x00000200
+# What 97 % of the production requests the workload is modelled on sent.
+SAMPLING = {"temperature": 1.0, "top_p": 0.95, "top_k": 20}
 
 _log_lock = threading.Lock()
 _log_path = None
@@ -235,6 +246,43 @@ class Serve:
 # Client: one closed-loop agent per actor, as an agent client drives the API.
 # ---------------------------------------------------------------------------------------
 
+class Rounds:
+    """A barrier whose parties can join and leave: the main sessions' lock-step turns.
+
+    A session in lock-step sends its next request only once every other session in lock-step
+    is also ready to send, so each round carries one request per session. A session leaves
+    while it waits on a signal or on its subagents, and when it finishes."""
+
+    def __init__(self):
+        self._cv = threading.Condition()
+        self._parties = 0
+        self._arrived = 0
+        self._round = 0
+
+    def join(self):
+        with self._cv:
+            self._parties += 1
+
+    def leave(self):
+        with self._cv:
+            self._parties -= 1
+            self._advance()
+
+    def await_round(self):
+        with self._cv:
+            current = self._round
+            self._arrived += 1
+            self._advance()
+            while self._round == current:
+                self._cv.wait()
+
+    def _advance(self):
+        if self._arrived and self._arrived >= self._parties:
+            self._arrived = 0
+            self._round += 1
+            self._cv.notify_all()
+
+
 def flatten(history):
     """The conversation as text, as compaction and loop-check side calls send it."""
     out = []
@@ -297,6 +345,7 @@ class ArmClient:
         self.client_log = os.path.join(out_dir, "client.jsonl")
         self.write_lock = threading.Lock()
         self.failures = []
+        self.rounds = Rounds()
 
     def signal(self, name):
         with self.sig_lock:
@@ -310,7 +359,8 @@ class ArmClient:
     # -- HTTP --------------------------------------------------------------------------
     def post(self, messages, tools, max_tokens, seed, abort_after=None):
         body = {"model": self.model_id, "messages": messages, "max_tokens": max_tokens,
-                "temperature": 1.0, "top_p": 0.95, "seed": seed, "stream": True,
+                "temperature": SAMPLING["temperature"], "top_p": SAMPLING["top_p"],
+                "top_k": SAMPLING["top_k"], "seed": seed, "stream": True,
                 "stream_options": {"include_usage": True}}
         if tools:
             body["tools"] = tools
@@ -436,6 +486,14 @@ class ArmClient:
             log("actor %s crashed:\n%s" % (actor["name"], traceback.format_exc()))
 
     def _run_actor(self, actor):
+        in_lockstep = [False]
+        try:
+            self._run_steps(actor, in_lockstep)
+        finally:
+            if in_lockstep[0]:
+                self.rounds.leave()
+
+    def _run_steps(self, actor, in_lockstep):
         persona = self.personas[actor["persona"]]
         tools = persona["tools"]
         hist = copy.deepcopy(actor["initial"])
@@ -444,17 +502,29 @@ class ArmClient:
         calib = 1.0
         for step in actor["steps"]:
             op = step["op"]
-            if op == "signal":
+            # A session in lock-step waits for its round before each request, ahead of the
+            # step's scripted tool/user delay: the delays, identical in every arm, then fix the
+            # order in which the sessions of one round send.
+            if in_lockstep[0] and op in ("request", "retry", "side_call", "compact"):
+                self.rounds.await_round()
+            if op == "lockstep":
+                self.rounds.join()
+                in_lockstep[0] = True
+            elif op == "signal":
                 self.signal(step["name"]).set()
             elif op == "wait":
-                self.signal(step["signal"]).wait()
+                self.leave_rounds_while(in_lockstep, self.signal(step["signal"]).wait)
             elif op == "spawn":
                 subs = [threading.Thread(target=self.run_actor, args=(self.actors[n],), daemon=True)
                         for n in step["actors"]]
-                for t in subs:
-                    t.start()
-                for t in subs:
-                    t.join()
+
+                def run_subagents():
+                    for t in subs:
+                        t.start()
+                    for t in subs:
+                        t.join()
+
+                self.leave_rounds_while(in_lockstep, run_subagents)
             elif op == "request":
                 self.deliver(hist, last_calls, step.get("obs"), step.get("user"))
                 time.sleep(step.get("delay", 0) + step.get("user_delay", 0))
@@ -501,7 +571,7 @@ class ArmClient:
                         {"role": "user", "content": flatten(hist) + COMPACT_INSTRUCTION}]
                 self.request(actor, step, msgs, p["tools"], step["max_tokens"], step["seed"],
                              step["cls"])
-                # The scripted summary (identical in both arms) seeds the fresh context.
+                # The scripted summary (identical in every arm) seeds the fresh context.
                 hist = [hist[0], {"role": "user", "content": RESUME_AFTER_COMPACT % step["summary"]}]
                 last_calls = []
             elif op == "clear_old_tool_results":
@@ -510,6 +580,17 @@ class ArmClient:
                              "cleared": n})
             else:
                 raise ValueError("unknown op %r" % op)
+
+    def leave_rounds_while(self, in_lockstep, blocking):
+        """Runs `blocking` outside the lock-step rounds, so the other sessions keep going."""
+        if not in_lockstep[0]:
+            blocking()
+            return
+        self.rounds.leave()
+        try:
+            blocking()
+        finally:
+            self.rounds.join()
 
     def run(self):
         tops = [a for a in self.plan["actors"] if a.get("top")]
@@ -537,7 +618,7 @@ def clear_old_tool_results(hist, keep_last):
 # ---------------------------------------------------------------------------------------
 
 def calibrate_ctx(model, ctrl_flags, bat_ctx, run_dir):
-    """Largest context (bat value first) at which the control starts; both arms use it."""
+    """Largest context (bat value first) at which the control starts; every arm uses it."""
     for ctx in [bat_ctx] + [c for c in CTX_FALLBACKS if c < bat_ctx]:
         probe = Serve(CONTROL_EXE, model, set_flag(ctrl_flags, "--max-context", str(ctx)),
                       os.path.join(run_dir, "calibration_%d.jsonl" % ctx),
@@ -549,7 +630,7 @@ def calibrate_ctx(model, ctrl_flags, bat_ctx, run_dir):
             log("  control does not start at %d: %s" % (ctx, e))
             continue
         probe.stop()
-        log("  control starts at %d; both arms run at this context" % ctx)
+        log("  control starts at %d; every arm runs at this context" % ctx)
         return ctx
     raise SystemExit("control failed to start at every candidate context")
 
@@ -578,21 +659,75 @@ def run_arm(name, exe, model, flags, plan, run_dir, ctx):
     return start, (client.failures if client else [("arm", "did not run")])
 
 
+def run_seed(seed, plan, run_dir, arms, model, flags, ctrl_supported, config, ctx):
+    """Every selected arm on one workload seed, then that seed's report."""
+    with open(os.path.join(run_dir, "plan.json"), "w", encoding="utf-8") as f:
+        json.dump(plan, f)
+    log("=== seed %d: %s" % (seed, workload.summarize(plan).splitlines()[-1]))
+    config = dict(config, seed=seed, corpus_commit=plan["corpus_commit"], max_context=ctx)
+    t0 = time.time()
+    failures = []
+    starts = {}
+    if "treatment" in arms:
+        config["treatment_flags"] = set_flag(flags["treatment"], "--max-context", str(ctx))
+        starts["treatment"], f = run_arm("treatment", TREATMENT_EXE, model,
+                                         config["treatment_flags"], plan, run_dir, ctx)
+        failures += f
+    if "alt" in arms:
+        config["alt_flags"] = set_flag(flags["alt"], "--max-context", str(ctx))
+        starts["alt"], f = run_arm("alt", TREATMENT_EXE, model, config["alt_flags"], plan,
+                                   run_dir, ctx)
+        failures += f
+    if "control" in arms:
+        ctrl = set_flag(flags["control"], "--max-context", str(ctx))
+        if "--host-cache-mib" in dict(flags["treatment"]) and \
+                "--host-cache-mib" not in ctrl_supported:
+            if starts.get("treatment") is None:
+                raise SystemExit("the control's host-cache translation needs the treatment's "
+                                 "resolved split; run the treatment arm first")
+            for n, v in host_translation(starts["treatment"]):
+                ctrl = set_flag(ctrl, n, v)
+            log("control host cache = treatment's resolved --host-cache-mib split: %s"
+                % flag_str(host_translation(starts["treatment"])))
+        config["control_flags"] = ctrl
+        starts["control"], f = run_arm("control", CONTROL_EXE, model, ctrl, plan, run_dir, ctx)
+        failures += f
+    config["total_seconds"] = time.time() - t0
+    with open(os.path.join(run_dir, "config.json"), "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=1)
+    log("=== seed %d: all arms finished in %.1f min" % (seed, config["total_seconds"] / 60))
+    if "control" in arms and len(arms) > 1:
+        import analyze
+        analyze.main([run_dir])
+    else:
+        log("no report: analyze.py compares arms with a control arm in the same run directory")
+    return failures
+
+
 def main():
     global _log_path
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--arms", default="treatment,control")
-    ap.add_argument("--ctx", type=int, help="skip calibration and run both arms at this context")
+    ap.add_argument("--arms", default="treatment,control",
+                    help="any of treatment, alt, control; they run in that order")
+    ap.add_argument("--ctx", type=int, help="skip calibration and run every arm at this context")
     ap.add_argument("--scale", type=float, default=1.0, help="stretch the session loop lengths")
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seeds", default="42",
+                    help="comma-separated workload seeds; with more than one, each seed runs "
+                         "every arm into <out>/seed-<n> and a combined report is written to <out>")
     ap.add_argument("--out", help="run directory (default: AB_OUT/<timestamp>)")
     ap.add_argument("--dry-run", action="store_true", help="print the plan and flags only")
     args = ap.parse_args()
     arms = [a.strip() for a in args.arms.split(",") if a.strip()]
+    unknown = set(arms) - {"treatment", "alt", "control"}
+    if unknown:
+        raise SystemExit("unknown arm(s): %s" % ", ".join(sorted(unknown)))
+    seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
+    if not seeds or len(set(seeds)) != len(seeds):
+        raise SystemExit("--seeds needs distinct integers")
 
-    run_dir = args.out or os.path.join(OUT_ROOT, time.strftime("%Y%m%d-%H%M%S"))
-    os.makedirs(run_dir, exist_ok=True)
-    _log_path = os.path.join(run_dir, "runner.log")
+    out_dir = args.out or os.path.join(OUT_ROOT, time.strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(out_dir, exist_ok=True)
+    _log_path = os.path.join(out_dir, "runner.log")
 
     bat_model, bat_flags = parse_bat(LAUNCH_BAT)
     model = MODEL or bat_model
@@ -603,63 +738,52 @@ def main():
     for extra in TREATMENT_EXTRA_FLAGS:
         if extra not in dict(treat_flags):
             treat_flags.append((extra, None))
+    alt_flags = list(treat_flags)
+    for extra in ALT_EXTRA_FLAGS:
+        if extra not in dict(alt_flags):
+            alt_flags.append((extra, None))
     ctrl_supported = help_flags(CONTROL_EXE)
     ctrl_flags = [f for f in base if f[0] in ctrl_supported]
     dropped = [f[0] for f in treat_flags if f[0] not in ctrl_supported]
 
-    plan = workload.build_plan(seed=args.seed, scale=args.scale)
-    log("plan: " + workload.summarize(plan).splitlines()[-1])
+    plans = {seed: workload.build_plan(seed=seed, scale=args.scale) for seed in seeds}
     log("model: %s" % model)
     log("treatment flags: %s" % flag_str(treat_flags))
+    if "alt" in arms:
+        log("alt flags: treatment + %s" % " ".join(ALT_EXTRA_FLAGS))
     log("control drops (not in its --help): %s" % ", ".join(dropped))
-    config = {"launch_bat": LAUNCH_BAT, "model": model, "treatment_exe": TREATMENT_EXE,
-              "control_exe": CONTROL_EXE, "treatment_flags": treat_flags,
-              "control_flags_base": ctrl_flags, "dropped_for_control": dropped,
-              "seed": args.seed, "scale": args.scale, "corpus_commit": plan["corpus_commit"],
-              "agent_max_tokens": AGENT_MAX_TOKENS}
     if args.dry_run:
-        print(workload.summarize(plan))
+        for seed in seeds:
+            print("seed %d:\n%s" % (seed, workload.summarize(plans[seed])))
         print("control flags:", flag_str(ctrl_flags))
         return
-    for exe in ([TREATMENT_EXE] if "treatment" in arms else []) + \
+    for exe in ([TREATMENT_EXE] if {"treatment", "alt"} & set(arms) else []) + \
                ([CONTROL_EXE] if "control" in arms else []):
         if not os.path.exists(exe):
             raise SystemExit("missing serve executable: %s" % exe)
-    with open(os.path.join(run_dir, "plan.json"), "w", encoding="utf-8") as f:
-        json.dump(plan, f)
 
     t0 = time.time()
-    ctx = args.ctx or (calibrate_ctx(model, without(ctrl_flags, {"--max-context"}), bat_ctx, run_dir)
+    ctx = args.ctx or (calibrate_ctx(model, without(ctrl_flags, {"--max-context"}), bat_ctx, out_dir)
                        if "control" in arms else bat_ctx)
-    config["max_context"] = ctx
-    config["bat_max_context"] = bat_ctx
+    config = {"launch_bat": LAUNCH_BAT, "model": model, "treatment_exe": TREATMENT_EXE,
+              "control_exe": CONTROL_EXE, "treatment_flags": treat_flags,
+              "alt_extra_flags": ALT_EXTRA_FLAGS if "alt" in arms else None,
+              "control_flags_base": ctrl_flags, "dropped_for_control": dropped,
+              "scale": args.scale, "agent_max_tokens": AGENT_MAX_TOKENS, "sampling": SAMPLING,
+              "bat_max_context": bat_ctx}
+    flags = {"treatment": treat_flags, "alt": alt_flags, "control": ctrl_flags}
     failures = []
-    starts = {}
-    if "treatment" in arms:
-        flags = set_flag(treat_flags, "--max-context", str(ctx))
-        config["treatment_flags"] = flags
-        starts["treatment"], f = run_arm("treatment", TREATMENT_EXE, model, flags, plan, run_dir, ctx)
-        failures += f
-    if "control" in arms:
-        flags = set_flag(ctrl_flags, "--max-context", str(ctx))
-        if "--host-cache-mib" in dict(treat_flags) and "--host-cache-mib" not in ctrl_supported:
-            if starts.get("treatment") is None:
-                raise SystemExit("the control's host-cache translation needs the treatment's "
-                                 "resolved split; run the treatment arm first")
-            for n, v in host_translation(starts["treatment"]):
-                flags = set_flag(flags, n, v)
-            log("control host cache = treatment's resolved --host-cache-mib split: %s"
-                % flag_str(host_translation(starts["treatment"])))
-        config["control_flags"] = flags
-        starts["control"], f = run_arm("control", CONTROL_EXE, model, flags, plan, run_dir, ctx)
-        failures += f
-    config["total_seconds"] = time.time() - t0
-    with open(os.path.join(run_dir, "config.json"), "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=1)
-    log("all arms finished in %.1f min" % (config["total_seconds"] / 60))
-
-    import analyze
-    analyze.main([run_dir])
+    run_dirs = []
+    for seed in seeds:
+        run_dir = out_dir if len(seeds) == 1 else os.path.join(out_dir, "seed-%d" % seed)
+        os.makedirs(run_dir, exist_ok=True)
+        failures += run_seed(seed, plans[seed], run_dir, arms, model, flags, ctrl_supported,
+                             config, ctx)
+        run_dirs.append(run_dir)
+    log("all seeds finished in %.1f min" % ((time.time() - t0) / 60))
+    if len(seeds) > 1 and "control" in arms and len(arms) > 1:
+        import analyze
+        analyze.aggregate(out_dir, run_dirs)
     if failures:
         log("RUN INVALID: %d client request failure(s): %s" % (len(failures), failures[:5]))
         raise SystemExit(1)
