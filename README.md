@@ -87,6 +87,52 @@ in the [hybrid prefix cache spec](docs/maintainer/hybrid-prefix-cache-spec.md).
 
 ## Performance: this fork vs upstream
 
+### Three-way agentic A/B (September 2026)
+
+The closed-loop agentic suite in [`bench/agentic_ab/`](bench/agentic_ab/README.md) replays three
+interleaved coding-agent sessions plus eight subagents: 115 requests with fan-outs, compaction,
+retries and an abort, prompts of 25K-130K tokens and thinking on. Each arm's own answers are fed
+back as an agent client does. All three arms served the official Qwen3.8-27B NVFP4 artifact on an
+RTX 5090 with the production launch flags (DFlash2 + ngram drafting, `--max-concurrency 2`, int8 KV,
+52 GB host cache) at `--max-context 160000`, the largest context the upstream build starts with.
+
+- **Upstream + Windows port:** upstream at the commit this fork merged, plus only the Windows port
+  (build `96da12bb`), given the same host RAM split as the default cache.
+- **master:** this fork with the default prefix cache and `--fast-prefill-kernel`.
+- **master + alt cache:** the same build with `--use-alt-prefix-caching` added.
+
+| Metric | Upstream + Windows port | master | master + alt cache |
+|---|---|---|---|
+| Average time to first token (s) | 19.1 | 8.6 (−55 %) | 4.2 (−78 %) |
+| Median time to first token (s) | 15.4 | 3.6 (−77 %) | 2.1 (−86 %) |
+| 90th-percentile time to first token (s) | 38.8 | 24.0 (−38 %) | 10.4 (−73 %) |
+| Average TTFT, continuing-session turns (s) | 18.7 | 8.7 (−53 %) | 3.5 (−81 %) |
+| Average TTFT, new long prompts (s) | 15.7 | 11.2 (−29 %) | 10.8 (−31 %) |
+| Prompt tokens served from cache | 68.3 % | 75.0 % | 90.0 % |
+| Prompt tokens prefilled | 1,692,372 | 1,324,217 (−22 %) | 544,810 (−68 %) |
+| Main-session turns that re-prefilled the whole prompt (of 72) | 18 | 11 | 1 |
+| Subagent turns that re-prefilled the whole prompt (of 28) | 19 | 7 | 0 |
+| Prefill tok/s, requests with no cache hit in any arm | 5,139 | 6,126 (+19 %) | 7,309 (+42 %) |
+| Output tok/s while decoding (server, all lanes) | 152 | 197 (+29 %) | 227 (+49 %) |
+| Single-request decode tok/s, same requests decoding alone (median) | 208 | 192 | 203 |
+| Workload wall time (min) | 16.6 | 12.3 (−26 %) | 9.6 (−42 %) |
+
+How to read it:
+
+- TTFT includes queueing: up to seven requests are in flight on two lanes. The average queue wait
+  was 16.3 s / 6.2 s / 3.4 s. Without it, TTFT averaged 2.83 s / 2.40 s / 0.75 s.
+- The prefill-rate row covers the 9 requests that had no cache hit in any arm. With the
+  alternative cache, prefill splits only at its own snapshot points, not at every assistant
+  message's template boundaries.
+- Single-request decode compares only the 7 requests that decoded alone in all three arms, so it
+  is noisy. The other rows cover all 115 requests.
+- One master request failed with a resource-accounting error in the default cache's capture path,
+  also seen in earlier runs before these changes. The other two arms completed every request.
+- Sampled output differs between arms (completion totals 132K / 135K / 131K tokens, about 78 %
+  thinking), so compare repeated runs before attributing small differences.
+
+### Earlier A/B: default cache vs upstream (September 2026)
+
 Both builds served the same model on the same GPU and replayed the same agent-style workload:
 
 - **Model and GPU:** the official NInfer Qwen3.8-27B NVFP4 artifact
