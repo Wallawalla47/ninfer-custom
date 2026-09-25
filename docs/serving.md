@@ -874,7 +874,6 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |
 | `--vision` | enable media input and load Vision GPU allocations | off |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
-| `--cuda-graph-allowance-mib N` | total CUDA Graph driver-state allowance in MiB, subtracted from the KV sizing budget | computed |
 | `--no-prefix-reuse` | disable compatible-prefix caching; rejected with any prefix-cache option below | prefix reuse on |
 | `--use-original-prefix-caching` | select the original checkpoint-catalog prefix cache instead of the hybrid prefix cache ([spec](maintainer/hybrid-prefix-cache-spec.md)), whose content-addressed 64-token KV blocks are shared across requests alongside sparse state snapshots. The hybrid cache configures itself: `--kv-capacity` defaults to `auto` (free VRAM becomes Device block cache) and `--host-cache-mib` sizes the one pinned Host pool that blocks and snapshots share. The hybrid options below are rejected with this flag, and the original options require it. | hybrid cache |
 | `--device-snapshot-slots N` | hybrid: Device state snapshot slots (`1..64`) | `max-concurrency + 1`; `+ 2` without a Host tier |
@@ -1151,10 +1150,9 @@ decode-graph executable the engine instantiates: one per topology class of each 
 for every batch size up to `--max-concurrency` (DFlash and DFlash2 capture a second family when
 n-gram drafting is enabled). Measured on an RTX 5090 an executable takes 2.2-2.9 MiB, and up to
 4.1 MiB when MTP verifies a 15-wide n-gram window at batch 4-8, so DFlash2 with
-`--max-concurrency 2` reserves 112 MiB and uses about 30 MiB.
-`--cuda-graph-allowance-mib` replaces the computed total; a too-small value risks CUDA
-out-of-memory at graph capture and a too-large one shrinks the KV pool. The startup log and
-`server_start` report both the allowance and the memory the graphs actually used.
+`--max-concurrency 2` reserves 112 MiB and uses about 30 MiB. The startup log and `server_start`
+report both the allowance and the memory the graphs actually used, and the log warns when the
+second exceeds the first.
 Capacity resolves once at startup.
 
 Admission reserves a bounded Device KV window over the request's remaining output and extends it at

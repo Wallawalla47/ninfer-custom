@@ -97,7 +97,6 @@ BAT_FLAGS = [
     ("--ngram-archive-mib", "2048"),
     ("--ngram-session-mib", "256"),
     ("--ngram-native-sessions", None),
-    ("--cuda-graph-allowance-mib", "500"),
     ("--default-thinking-budget", "16384"),
     ("--thinking-budget-message", "Considering the limited time available to the user, "
      "I must stop thinking now. Time to act:"),

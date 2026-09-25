@@ -564,8 +564,8 @@ void OperationalLog::engine_capacity(const GenerationService& service) const {
     if (memory.cuda_graph_measured_bytes > memory.cuda_graph_allowance_bytes) {
         // The KV pool was sized against the allowance, so the excess came out of the slack left
         // beside it; with no headroom the next allocation can fail.
-        logger_->warn("CUDA graphs used {} but the KV sizing allowed {}; raise "
-                      "--cuda-graph-allowance-mib",
+        logger_->warn("CUDA graphs used {} but the KV sizing allowed {}; leave more room with "
+                      "--kv-headroom-mib or a smaller --kv-capacity",
                       product::format_pretty_bytes(memory.cuda_graph_measured_bytes),
                       product::format_pretty_bytes(memory.cuda_graph_allowance_bytes));
     }

@@ -956,9 +956,6 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
             kGraphDriverAllowance,
             checked_mul(kGraphExecutableAllowance, executables, "CUDA Graph executable allowance"),
             "CUDA Graph allowance");
-        if (inputs.cuda_graph_allowance_bytes != 0) {
-            impl->graph_allowance_bytes = inputs.cuda_graph_allowance_bytes;
-        }
     }
 
     impl->device_reservation_bytes = checked_add(
@@ -1060,15 +1057,14 @@ make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContex
         .fast_prefill_kernel = options.fast_prefill_kernel,
         .draft_window =
             std::max(options.speculative.draft_tokens, options.speculative.ngram_draft_tokens),
-        .speculative_backend        = options.speculative.backend,
-        .kv_storage                 = options.kv_cache,
-        .proposal_head              = options.speculative.proposal_head,
-        .features                   = models::load_options(options),
-        .use_cuda_graph             = options.use_cuda_graph,
-        .cuda_graph_allowance_bytes = options.cuda_graph_allowance_bytes,
-        .causal_scoring             = options.purpose == EnginePurpose::CausalScoring,
-        .device                     = options.device,
-        .context_cache              = options.context_cache,
+        .speculative_backend = options.speculative.backend,
+        .kv_storage          = options.kv_cache,
+        .proposal_head       = options.speculative.proposal_head,
+        .features            = models::load_options(options),
+        .use_cuda_graph      = options.use_cuda_graph,
+        .causal_scoring      = options.purpose == EnginePurpose::CausalScoring,
+        .device              = options.device,
+        .context_cache       = options.context_cache,
     };
     const std::uint32_t logical_pages = page_count(inputs.capacity);
     const std::uint32_t minimum_pages = std::max(logical_pages, inputs.max_concurrency);
