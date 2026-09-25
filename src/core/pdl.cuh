@@ -74,11 +74,21 @@ __device__ __forceinline__ void wait_for_dependencies() { cudaGridDependencySync
 // other than reading immutable weights; a CTA that returns early must still have called it, so
 // completion of this grid implies completion of everything it depends on.
 //
-// enter(): for a short kernel. It lets the next captured kernel begin launching once every CTA of
-// this grid is resident, then waits until the preceding grid has completed and its writes are
-// visible.
+// Number of SMs on this device.
+__device__ __forceinline__ unsigned sm_count() {
+    unsigned count;
+    asm volatile("mov.u32 %0, %%nsmid;" : "=r"(count));
+    return count;
+}
+
+// enter(): for a short kernel. It waits until the preceding grid has completed and its writes are
+// visible. A grid covering at most half the SMs first lets the next captured kernel begin
+// launching once every CTA of this grid is resident. A wider grid does not: a dependent launched
+// beside it gets only the SMs it leaves free, and a streaming consumer smaller than one wave (the
+// NVFP4 down projection behind its 17408-column quantize, for example) packs onto those few SMs
+// and runs up to half as fast. Such a grid lets dependents launch as its CTAs exit.
 __device__ __forceinline__ void enter() {
-    trigger_dependents();
+    if (2U * gridDim.x * gridDim.y * gridDim.z <= sm_count()) { trigger_dependents(); }
     wait_for_dependencies();
 }
 

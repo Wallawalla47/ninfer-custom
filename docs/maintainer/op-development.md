@@ -289,7 +289,11 @@ kernel node; an eager launch is an ordinary stream-ordered launch. A kernel laun
 `pdl::enter()` or `pdl::enter_streaming()` in every thread before any access except reads of
 immutable weights, including before an early return, so completion of its grid implies completion
 of everything upstream. Short kernels use `enter()`, which lets the next node begin launching as
-soon as the grid is resident. Kernels that stream most of their bytes in a main loop use
+soon as the grid is resident when the grid covers at most half the SMs. A wider short grid lets it
+launch only as its CTAs exit: a dependent launched beside it gets only the SMs it leaves free, and a
+streaming consumer smaller than one wave packs onto them. Behind the 136-CTA quantize of its
+17408-column input, the one-wave NVFP4 MLP down projection ran about 50 % longer that way at four
+concurrent requests. Kernels that stream most of their bytes in a main loop use
 `enter_streaming()` and call `pdl::trigger_dependents()` after that loop (or rely on the trigger at
 exit): an entry-time trigger lets later nodes occupy SMs and prefetch weights while the loop is
 still streaming, which measured about 10 % slower on the RTX 5090 DFlash2 round. A streaming kernel
