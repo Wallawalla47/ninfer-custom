@@ -20,8 +20,8 @@ import sys
 # Every arm is compared with the control; `alt` is the treatment build with AB_ALT_EXTRA_FLAGS.
 ARMS = ("control", "treatment", "alt")
 LABEL = {"control": "Upstream + Windows port", "treatment": "This fork",
-         "alt": "This fork, alternative prefix cache"}
-SHORT = {"control": "Upstream", "treatment": "Fork", "alt": "Fork alt-cache"}
+         "alt": "This fork, original prefix cache"}
+SHORT = {"control": "Upstream", "treatment": "Fork", "alt": "Fork original-cache"}
 CONTINUING = {"loop", "after_idle", "history_edit", "retry", "abort_retry", "subagent_loop"}
 NEW_LONG = {"cold_resume", "compaction", "check"}
 CLASS_DOC = [
@@ -497,7 +497,7 @@ def headline(arms, ms):
 
 
 def each(arms, value, fmt=lambda v: v):
-    """`upstream 1.2, fork 3.4, fork + alt cache 5.6`, for the notes."""
+    """`upstream 1.2, fork 3.4, fork + original cache 5.6`, for the notes."""
     return ", ".join("%s %s" % (SHORT[a].lower(), fmt(value(a))) for a in arms)
 
 

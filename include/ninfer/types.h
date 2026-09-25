@@ -146,6 +146,8 @@ struct StartupObserver {
 // ResourceManager (docs/maintainer/resource-scheduling-and-context-cache.md). Hybrid is the
 // content-addressed block tree with sparse state snapshots
 // (docs/maintainer/hybrid-prefix-cache-spec.md).
+// Prefix-cache design. ninfer-serve selects Hybrid unless --use-original-prefix-caching selects
+// Legacy; the Engine option itself defaults to Legacy.
 enum class ContextCacheMode : std::uint8_t {
     Legacy,
     Hybrid,

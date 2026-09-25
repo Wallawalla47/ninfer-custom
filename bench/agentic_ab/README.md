@@ -2,7 +2,8 @@
 
 A black-box A/B benchmark of two `ninfer-serve` builds serving the same model on the same GPU,
 driven by a closed-loop replay of real agentic coding traffic over the OpenAI chat-completions
-API. An optional third arm runs the fork build with the alternative prefix cache. It produces a
+API. The fork runs its default hybrid prefix cache; an optional third arm runs the fork build with
+the original prefix cache (`--use-original-prefix-caching`). It produces a
 README-style comparison table covering:
 
 - **prefix-cache hits** (tokens served from cache, continuing turns that had to re-prefill);
@@ -122,9 +123,10 @@ Several workload seeds (`--seeds`) show how much a result depends on the particu
    python runner.py
    ```
 
-   `--arms treatment,alt,control` adds the alternative-prefix-cache arm (about 50 minutes; the
-   arms always run in that order, because the control's host cache is translated from the
-   treatment's). `--seeds 42,43,44` runs every arm once per workload seed, seed by seed, into
+   `--arms treatment,alt,control` adds the original-prefix-cache arm (about 50 minutes; the arms
+   always run in that order). The control's host cache is translated from the split the fork's
+   original cache resolves for the same `--host-cache-mib`, read from one extra startup of the
+   fork before the first seed. `--seeds 42,43,44` runs every arm once per workload seed, seed by seed, into
    `<out>/seed-<n>`, and writes a combined report to `<out>/report.md`; each seed replays
    different observations. `--ctx N` skips calibration, `--scale F` stretches or shrinks the
    session loops (0.3 is a quick smoke run), `--dry-run` prints the plans and flags.
@@ -140,7 +142,7 @@ Several workload seeds (`--seeds`) show how much a result depends on the particu
 | `AB_TREATMENT_EXE` | `build-windows\apps\Release\ninfer-serve.exe` in this checkout |
 | `AB_CONTROL_EXE` | `bench\agentic_ab\control\build\apps\Release\ninfer-serve.exe` |
 | `AB_TREATMENT_EXTRA_FLAGS` | `--fast-prefill-kernel` |
-| `AB_ALT_EXTRA_FLAGS` | `--use-alt-prefix-caching` (added to the treatment's flags) |
+| `AB_ALT_EXTRA_FLAGS` | `--use-original-prefix-caching` (added to the treatment's flags) |
 | `AB_HOST` / `AB_PORT` | `127.0.0.1` / `8080` |
 | `AB_OUT` | `profiles\bench\agentic_ab` in this checkout |
 | `AB_CORPUS_REPO` / `AB_CORPUS_COMMIT` | this checkout / `e48a0d28` |

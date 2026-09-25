@@ -1,10 +1,11 @@
 # Hybrid Prefix Cache (HPC): design and implementation specification
 
-Status: **implementation in progress**. HPC is an *alternative* prefix-cache mode selected at
-launch with `--use-alt-prefix-caching` (`ContextCacheOptions::mode = ContextCacheMode::Hybrid`).
-The existing system ([Resource scheduling and context cache](resource-scheduling-and-context-cache.md))
-remains the default (`ContextCacheMode::Legacy`) and is not modified or removed; the two modes
-coexist by explicit owner request. This document is the authority for the Hybrid mode.
+Status: **implementation in progress**. HPC is `ninfer-serve`'s default prefix-cache mode
+(`ContextCacheOptions::mode = ContextCacheMode::Hybrid`). The original system
+([Resource scheduling and context cache](resource-scheduling-and-context-cache.md)) stays available
+with `--use-original-prefix-caching` (`ContextCacheMode::Legacy`, still the Engine option default)
+and is not modified or removed; the two modes coexist by explicit owner request. This document is
+the authority for the Hybrid mode.
 
 Scope: an alternative to NInfer's prefix-reuse, checkpoint-retention and cache-pressure
 system for `Qwen3_5ForCausalLM` / `Qwen3_5MoeForCausalLM` on one RTX 5090 (`sm_120a`), with
@@ -15,10 +16,11 @@ Coexistence rules:
 
 - The mode is fixed at Engine construction. Legacy-only options (`--device-state-slots`,
   `--host-state-slots`, `--host-kv-mib`, `--max-private-continuations`, `--max-shared-prefixes`,
-  `--max-long-anchors-per-continuation`, `--long-anchor-spacing`) are rejected together with
-  `--use-alt-prefix-caching`; Hybrid-only options are rejected without it. `--host-cache-mib`
+  `--max-long-anchors-per-continuation`, `--long-anchor-spacing`) require
+  `--use-original-prefix-caching`; Hybrid-only options are rejected with it. `--host-cache-mib`
   applies to both modes (in Hybrid mode it sizes the Host slab pool); `--no-prefix-reuse`
-  contradicts the mode and is rejected with it.
+  disables the cache and is rejected with `--use-original-prefix-caching` and with every
+  mode-specific option.
 - Hybrid mode reuses the active-execution machinery unchanged: `LogicalKVPageStore`,
   `KVAddressSpaceStore`, execution rows, the active `StateStore` images, prefill/decode/speculative
   paths. It replaces only admission-source selection, retention, capture and pressure. Tree nodes
@@ -30,7 +32,7 @@ Coexistence rules:
 
 ## Implementation status (branch `feat/hybrid-prefix-cache`)
 
-Hybrid mode is implemented and selectable with `--use-alt-prefix-caching`. It configures itself:
+Hybrid mode is implemented and is `ninfer-serve`'s default. It configures itself:
 the only capacity a deployment chooses is `--host-cache-mib` (default 8192, 0 = Device only);
 every other value is derived from the rest of the configuration (§14.2).
 
@@ -57,7 +59,7 @@ every other value is derived from the rest of the configuration (§14.2).
 Measured on an RTX 5090 (Windows, CUDA 13.4) with Qwen3.8-27B NVFP4
 (`qwen3_8_27b_nvfp4-nvidia.ninfer`), `ninfer-serve --max-context 32768 --max-concurrency 2
 --kv-dtype int8 --kv-capacity auto --prefill-chunk 2048 --host-cache-mib 12000`, plus
-`--use-alt-prefix-caching` for Hybrid, a fresh server per workload:
+`--use-original-prefix-caching` for Legacy, a fresh server per workload:
 
 | workload | Legacy | Hybrid |
 |---|---|---|
@@ -1120,7 +1122,7 @@ Each phase builds, passes its tests and is committed separately (Conventional Co
 | P0 | Baseline: run the agent trace and microbenchmarks on current master; add planning-time and TTFT-breakdown fields to the request log if missing | baseline recorded |
 | P1 | `src/core/host_slab_pool.*`; `src/runtime/prefix_cache/{block_tree,snapshot_index,device_lru,host_gdsf,tap_planner,cost}.{h,cpp}`; Frontend `block_hashes` and `tap_hints` | §13.1 green |
 | P2 | Ops: GDN phase+tap, conv, hidden and ring taps, `paged_kv_transfer` (A and B), startup calibration | §13.2 green; transfer path selected |
-| P3 | Program integration in `src/models/qwen3_5/program/prefix/`: admit/restore/poll, prefill taps and unit publication, block commit, finish/cancel, eviction hooks, lease settlement; Engine dispatch on `ContextCacheMode`; `--use-alt-prefix-caching` and Hybrid options/CLI/serving mapping. Legacy code is untouched | builds; §13.3 green in Hybrid mode; Legacy tests unchanged and green |
+| P3 | Program integration in `src/models/qwen3_5/program/prefix/`: admit/restore/poll, prefill taps and unit publication, block commit, finish/cancel, eviction hooks, lease settlement; Engine dispatch on `ContextCacheMode`; the serving mode selection and Hybrid options/CLI/serving mapping. Legacy code is untouched | builds; §13.3 green in Hybrid mode; Legacy tests unchanged and green |
 | P4 | Performance acceptance (§13.4, Hybrid vs Legacy on identical traces); tune defaults (`D`, `max_new_taps`, `tap_ladder_tokens`, `tap_min_gap`, transfer CTAs) | §13.4 met |
 | P5 | Documentation: link this document from docs/README.md, engine-architecture.md and resource-scheduling-and-context-cache.md as the Hybrid-mode authority; document the flag in serving.md, cli.md and README | links checked, `git diff --check` |
 | P6 (optional) | §12 features, each with its own gate | per gate |
@@ -1164,7 +1166,7 @@ struct HybridPrefixCacheOptions {                           // used only when mo
 };
 
 struct ContextCacheOptions {                  // existing struct, extended
-    ContextCacheMode mode = ContextCacheMode::Legacy; // --use-alt-prefix-caching selects Hybrid
+    ContextCacheMode mode = ContextCacheMode::Legacy; // ninfer-serve selects Hybrid by default
     HybridPrefixCacheOptions hybrid;
     // Hybrid mode: host_cache_budget_bytes (--host-cache-mib) sizes the one slab pool.
     // ... existing Legacy fields unchanged ...

@@ -74,9 +74,11 @@ BAT_MAX_CONTEXT = "220000"
 # --prefill-chunk 2048 / --ngram-min-match 12; edit here to benchmark your own
 # configuration. The treatment uses all of them; the control uses the subset its
 # --help supports (fork-only flags are dropped automatically). --request-log-jsonl
-# is appended by build_args().
+# is appended by build_args(). The published run used the fork's original prefix cache,
+# which the fork now selects with --use-original-prefix-caching.
 BAT_FLAGS = [
     ("--host", HOST), ("--port", str(PORT)),
+    ("--use-original-prefix-caching", None),
     ("--max-context", "220000"), ("--max-concurrency", "2"),
     ("--spec", "dflash2"), ("--draft-tokens", "7"),
     ("--lm-head-draft", None),

@@ -12,21 +12,27 @@ See [CUDA synchronization](cli.md#cuda-synchronization) for the shared `NINFER_C
   --host 127.0.0.1 \
   --port 8080 \
   --max-context 240000 \
-  --kv-capacity 240000 \
   --max-concurrency 2 \
   --kv-dtype fp8 \
-  --device-state-slots 2 \
-  --host-state-slots 8 \
-  --host-kv-mib 8192 \
+  --host-cache-mib 8192 \
   --spec mtp --draft-tokens 3 \
   --lm-head-draft \
   --preserve-thinking
 ```
 
-The command uses Qwen3.8-27B NVFP4. Each request has a 240,000-token logical ceiling. A shared
-240,000-token Main Text KV pool serves admitted requests; either request may use the full capacity
-when running alone, and two requests run concurrently when their complete reservations fit.
+The command uses Qwen3.8-27B NVFP4. Each request has a 240,000-token logical ceiling. The default
+hybrid prefix cache ([spec](maintainer/hybrid-prefix-cache-spec.md)) sizes the shared Main Text KV
+pool to the Device memory the model and runtime leave free (`--kv-capacity` defaults to `auto`).
+Admitted requests draw their pages from it, and pages no active request holds are the Device block
+cache: content-addressed 64-token KV blocks shared across requests. Two requests run concurrently
+when their complete reservations fit. `--host-cache-mib 8192` is the one pinned Host pool that
+blocks and sparse state snapshots share; every other cache capacity is derived from
+`--max-concurrency` and `--prefill-chunk`.
 
+`--use-original-prefix-caching` selects the original checkpoint-catalog cache instead, with its own
+capacity flags, for example `--use-original-prefix-caching --kv-capacity 240000
+--device-state-slots 2 --host-state-slots 8 --host-kv-mib 8192` in place of `--host-cache-mib`.
+Its KV pool follows `--max-context` unless `--kv-capacity` is given.
 With `C=2` and two extra Device checkpoint slots, the process owns two active StateImage guarantees
 plus a global pool of two Device-resident checkpoints. Eight pinned Host State slots and 8 GiB of
 pinned Host KV retain inactive continuations under Device pressure. Active request capacity is two.
@@ -842,7 +848,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--model-id ID` | override the public OpenAI model alias | artifact `identity.model_id` |
 | `--rope-yarn-factor F` | startup-fixed runtime YaRN factor, finite `[1,4]`; extends allowed ceiling only | `1` |
 | `--max-context N` | logical context ceiling of each sequence | `8192` |
-| `--kv-capacity N\|auto` | explicit shared Main Text KV capacity, or maximize it from remaining GPU memory; omitted means `--max-context`, or `auto` with `--use-alt-prefix-caching` | `8192` |
+| `--kv-capacity N\|auto` | explicit shared Main Text KV capacity, or maximize it from remaining GPU memory; omitted means `auto` with the hybrid prefix cache and `--max-context` with `--use-original-prefix-caching` or `--no-prefix-reuse` | `auto` |
 | `--max-concurrency N` | maximum admitted requests; valid range `1..8` | `1` |
 | `--max-pending-requests N` | additional requests allowed to wait for admission | `16` |
 | `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `30000` |
@@ -869,21 +875,21 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--vision` | enable media input and load Vision GPU allocations | off |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
 | `--cuda-graph-allowance-mib N` | total CUDA Graph driver-state allowance in MiB, subtracted from the KV sizing budget | computed |
-| `--no-prefix-reuse` | disable compatible-prefix caching | prefix reuse on |
-| `--use-alt-prefix-caching` | select the hybrid prefix cache ([spec](maintainer/hybrid-prefix-cache-spec.md)): content-addressed 64-token KV blocks shared across requests plus sparse state snapshots. It configures itself: `--kv-capacity` defaults to `auto` (free VRAM becomes Device block cache) and `--host-cache-mib` sizes the one pinned Host pool that blocks and snapshots share. The Legacy capacity flags below are rejected with it. | off |
+| `--no-prefix-reuse` | disable compatible-prefix caching; rejected with any prefix-cache option below | prefix reuse on |
+| `--use-original-prefix-caching` | select the original checkpoint-catalog prefix cache instead of the hybrid prefix cache ([spec](maintainer/hybrid-prefix-cache-spec.md)), whose content-addressed 64-token KV blocks are shared across requests alongside sparse state snapshots. The hybrid cache configures itself: `--kv-capacity` defaults to `auto` (free VRAM becomes Device block cache) and `--host-cache-mib` sizes the one pinned Host pool that blocks and snapshots share. The hybrid options below are rejected with this flag, and the original options require it. | hybrid cache |
 | `--device-snapshot-slots N` | hybrid: Device state snapshot slots (`1..64`) | `max-concurrency + 1`; `+ 2` without a Host tier |
 | `--cache-taps-per-request N` | hybrid: new prefill state snapshots per request (`0..64`) | `8`; `2` without a Host tier |
 | `--cache-tap-ladder N` | hybrid: history-snapshot ladder base G; flexible taps at `prompt − G·2^k` | `max(4096, 2 * prefill-chunk)` |
 | `--cache-tap-min-gap N` | hybrid: minimum tokens between ladder snapshots | `max(1024, prefill-chunk)` |
 | `--prefix-cache-file PATH` | hybrid: at startup, restore the Host tier from `PATH` if the file exists; on clean shutdown (Ctrl+C, Ctrl+Break, or closing the console window), save it there (every Host-backed snapshot and the block path it resumes through). Windows ends a closing console's process about 5 s after the close; a save still running then is abandoned and the previous file kept, so stop large caches with Ctrl+C. `PATH` may be relative (resolved against the launch directory) or absolute, e.g. `--prefix-cache-file "e:\NInfer-Deploy-V3\file.cache"`. Its directory must exist, and the flag needs a Host tier (not `--host-cache-mib 0`). A file written for another artifact, KV format, speculative backend, RoPE scaling or `ninfer-serve` binary is ignored and replaced at shutdown. The startup log reports what was restored. Saving writes up to `--host-cache-mib` of data. | off: nothing is saved or restored |
-| `--device-state-slots N` | extra Device checkpoint StateImages beyond the active-lane guarantee | `max-concurrency` |
-| `--host-state-slots N` | pinned Host StateImage capacity | `8` |
-| `--host-kv-mib N` | shared pinned Host Main/Backend KV byte capacity in MiB | `8192` |
-| `--host-cache-mib N` | single pinned Host RAM ceiling for the whole retention tier in MiB. Hybrid mode: the slab pool KV blocks and state snapshots share, split at run time by eviction value; `0` keeps the cache on the Device only, and a nonzero budget below one snapshot is rejected. Default cache: the engine derives the Host StateImage slot count from the checkpoint inventory the capture path creates, spends the remaining state headroom on more long anchors per continuation, and gives Host KV the remainder. Replaces `--host-state-slots` and `--host-kv-mib`, which are rejected alongside it. | hybrid `8192`; otherwise unset (component flags used) |
-| `--max-private-continuations N` | private continuation descriptor capacity | `2 * max-concurrency` |
-| `--max-shared-prefixes N` | Engine-wide shared stable-prefix descriptor capacity | `max(max-concurrency, 7)` |
-| `--max-long-anchors-per-continuation N` | private long-anchor limit per continuation; the engine anchors up to N message boundaries automatically, on the grid set by `--long-anchor-spacing`. `--host-cache-mib` raises N within the state inventory it funds and never lowers it. | `4` |
-| `--long-anchor-spacing N` | minimum token gap between automatic long anchors, doubling per anchor walking back from the prompt end (anchor k sits at least `N * 2^k` tokens below the previous grid point), so short tool-loop turns do not each cost an anchor and deep history stays covered; `0` anchors every one of the last N message boundaries | `1024` |
+| `--device-state-slots N` | original: extra Device checkpoint StateImages beyond the active-lane guarantee | `max-concurrency` |
+| `--host-state-slots N` | original: pinned Host StateImage capacity | `8` |
+| `--host-kv-mib N` | original: shared pinned Host Main/Backend KV byte capacity in MiB | `8192` |
+| `--host-cache-mib N` | single pinned Host RAM ceiling for the whole retention tier in MiB. Hybrid mode: the slab pool KV blocks and state snapshots share, split at run time by eviction value; `0` keeps the cache on the Device only, and a nonzero budget below one snapshot is rejected. Original cache: the engine derives the Host StateImage slot count from the checkpoint inventory the capture path creates, spends the remaining state headroom on more long anchors per continuation, and gives Host KV the remainder. Replaces `--host-state-slots` and `--host-kv-mib`, which are rejected alongside it. | hybrid `8192`; otherwise unset (component flags used) |
+| `--max-private-continuations N` | original: private continuation descriptor capacity | `2 * max-concurrency` |
+| `--max-shared-prefixes N` | original: Engine-wide shared stable-prefix descriptor capacity | `max(max-concurrency, 7)` |
+| `--max-long-anchors-per-continuation N` | original: private long-anchor limit per continuation; the engine anchors up to N message boundaries automatically, on the grid set by `--long-anchor-spacing`. `--host-cache-mib` raises N within the state inventory it funds and never lowers it. | `4` |
+| `--long-anchor-spacing N` | original: minimum token gap between automatic long anchors, doubling per anchor walking back from the prompt end (anchor k sits at least `N * 2^k` tokens below the previous grid point), so short tool-loop turns do not each cost an anchor and deep history stays covered; `0` anchors every one of the last N message boundaries | `1024` |
 | `--no-thinking` | disable thinking by default | thinking on |
 | `--preserve-thinking` | preserve closed-turn assistant reasoning by default | off |
 | `--tolerant-tool-calls` | recover complete tool calls cut by a malformed wrapper, a trailing suffix or the output budget instead of demoting them to text | off |
@@ -912,12 +918,13 @@ non-thinking mode. Qwen3.6-35B-A3B differs only in its thinking presence penalty
 Frequency penalty is `0` for all registered presets. Process flags override registered values,
 request fields override process flags, and `--greedy` finally forces temperature `0`.
 
-For `C=--max-concurrency` and `H=--device-state-slots`, total Device StateImage capacity is `C+H`:
+With `--use-original-prefix-caching`, for `C=--max-concurrency` and `H=--device-state-slots`,
+total Device StateImage capacity is `C+H`:
 `C` slots guarantee active requests and `H` is a global checkpoint pool. Host State and Host KV are
 independent startup-fixed pinned-memory capacities; Host KV is shared by Main and the selected
 Backend pool and is consumed in physical page extents. `--no-prefix-reuse` selects root-only Engine
-mode and cannot be combined with any of the seven explicit context-cache capacity flags, including
-zero-valued flags.
+mode and cannot be combined with `--use-original-prefix-caching` or any prefix-cache option,
+including zero-valued flags.
 
 Run `./build/apps/ninfer-serve --help` for the exact option contract.
 
@@ -1006,7 +1013,7 @@ bound session's retained source count and bytes, `total_bytes` as the whole arch
 session, otherwise `null`.
 
 `request_done.materialization.cached_prefix_tokens` and `restored_host_bytes` describe a hybrid
-prefix-cache admission (`--use-alt-prefix-caching`) and are `0` with the default cache.
+prefix-cache admission and are `0` with `--use-original-prefix-caching`.
 `cached_prefix_tokens` is the longest prompt prefix held as cached KV blocks, whether or not it was
 reusable: reuse also needs a state snapshot inside it, so a gap to `prefix_cache_hit_tokens` is
 prefix lost to snapshot placement. `restored_host_bytes` is what the admission copied back from the
@@ -1072,7 +1079,7 @@ continuation endpoint. `occupancy.device_main_kv_lease_pages` and `device_backen
 are the part of `device_main_kv_pages` and `device_backend_kv_pages` that active requests hold as
 growth reservation but have not yet written.
 
-With the hybrid prefix cache (`--use-alt-prefix-caching`), `context_cache.hybrid` is present once
+With the hybrid prefix cache (the default), `context_cache.hybrid` is present once
 the cache has inserted a block or holds a snapshot. `device_blocks` (Device-resident 64-token KV blocks),
 `evictable_blocks` (those Device eviction may drop now), `tree_blocks` (blocks on the Device or
 Host), `snapshots`, `host_capacity_bytes`, and `host_used_bytes` are end-of-interval gauges; the rest
@@ -1137,7 +1144,8 @@ answer quality; validate the workload before deployment.
 
 `--max-context` is each sequence's logical ceiling. `--kv-capacity` fixes the shared Main Text KV
 pool used by active requests and retained prefixes. `auto` accounts for the complete enabled runtime
-and leaves 1 GiB of sizing headroom; omitting the option makes it follow `--max-context`. The
+and leaves 1 GiB of sizing headroom; omitting the option selects `auto` with the hybrid prefix
+cache and follows `--max-context` with `--use-original-prefix-caching` or `--no-prefix-reuse`. The
 CUDA Graph driver-state allowance reserved against that budget is 64 MiB plus 4 MiB for every
 decode-graph executable the engine instantiates: one per topology class of each captured family,
 for every batch size up to `--max-concurrency` (DFlash and DFlash2 capture a second family when
@@ -1156,7 +1164,11 @@ remains queued until a legal resource plan can satisfy its prompt plus that wind
 no longer extend the window, the request completes at the frontier its window covers and reports
 `finish_reason=length`.
 
-Each reusable checkpoint contains KV and complete continuation state. At admission, capture, and
+The hybrid prefix cache retains content-addressed KV blocks and sparse state snapshots; its
+admission, tap placement, Host tier and eviction are defined in the
+[hybrid prefix cache spec](maintainer/hybrid-prefix-cache-spec.md). With
+`--use-original-prefix-caching`, each reusable checkpoint contains KV and complete continuation
+state. At admission, capture, and
 finish boundaries, resource pressure may keep it on Device, move its StateImage and/or KV replicas
 to pinned Host memory, or evict it. The planner compares incoming-request work with the later
 recovery cost imposed on retained checkpoints. Active requests retain their state and completion

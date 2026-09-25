@@ -822,7 +822,7 @@ std::string format_throughput_json(const std::string& server_instance_id, std::u
                            {"shared_active_references", current.shared_active_references}}},
         {"actual_transfer_seconds", monotonic_delta(previous.actual_context_transfer_seconds,
                                                     current.actual_context_transfer_seconds)}};
-    // Hybrid prefix cache (--use-alt-prefix-caching): absolute occupancy, per-interval events.
+    // Hybrid prefix cache (the serving default): absolute occupancy, per-interval events.
     if (current.hybrid_snapshots != 0 || current.hybrid_tree_blocks != 0 ||
         current.hybrid_blocks_inserted != 0) {
         const auto delta = [&](std::uint64_t RuntimeStats::* field) {

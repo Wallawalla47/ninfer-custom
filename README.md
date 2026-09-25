@@ -11,12 +11,13 @@ upstream README follows, copied unchanged, under the "Upstream README" heading.
 
 **The short version.** Compared with upstream, this fork:
 
-- reuses cached prompt prefixes far more often in long multi-turn agent sessions, which roughly
-  halves time-to-first-token on that kind of workload;
+- reuses cached prompt prefixes far more often in long multi-turn agent sessions, which cuts
+  average time-to-first-token by about three quarters on that kind of workload (by about half
+  with the original cache);
 - has an optional faster prefill kernel for long prompts (`--fast-prefill-kernel`);
-- has an optional alternative prefix cache (`--use-alt-prefix-caching`) that shares KV between
-  conversations by content and keeps it in GPU memory, host RAM and optionally on disk (outlined
-  just below);
+- uses a hybrid prefix cache by default that shares KV between conversations by content and keeps
+  it in GPU memory, host RAM and optionally on disk (outlined just below); upstream's checkpoint
+  catalog, with this fork's fixes, remains available with `--use-original-prefix-caching`;
 - lets ngram copy drafting run with more than one concurrent request;
 - decodes about 2-2.5 % faster per speculative round, with the same output, by overlapping each
   decode kernel's launch and weight loading with the kernel before it;
@@ -25,11 +26,12 @@ upstream README follows, copied unchanged, under the "Upstream README" heading.
 - builds and runs natively on Windows;
 - recovers from out-of-memory and planner errors instead of stopping the whole engine.
 
-## The alternative prefix cache at a glance
+## The hybrid prefix cache at a glance
 
-`--use-alt-prefix-caching` replaces the default checkpoint catalog with a cache designed around
-how Qwen3.5-family models work. Most of their layers are linear-attention (GDN) layers, whose
-recurrent state cannot be rebuilt from the KV cache. So resuming a prompt needs two things: the KV
+The fork's default prefix cache replaces upstream's checkpoint catalog (still available with
+`--use-original-prefix-caching`) with a cache designed around how Qwen3.5-family models work.
+Most of their layers are linear-attention (GDN) layers, whose recurrent state cannot be rebuilt
+from the KV cache. So resuming a prompt needs two things: the KV
 of every earlier token, and a saved state at the exact token where the new prompt continues. The
 cache keeps those two things apart and stores each as cheaply as it can. Add `--host-cache-mib N`
 for host RAM (default 8192) and, optionally, `--prefix-cache-file PATH` to keep the cache across
@@ -84,7 +86,7 @@ usually only drops a copy.
 - `src/runtime/engine/context_cache/hybrid_resource_manager.h`: the Engine's admission contract.
 
 Features and measurements are described under
-[Alternative prefix cache](#alternative-prefix-cache---use-alt-prefix-caching), and the full design
+[Hybrid prefix cache](#hybrid-prefix-cache-the-default), and the full design
 in the [hybrid prefix cache spec](docs/maintainer/hybrid-prefix-cache-spec.md).
 
 ## Performance: this fork vs upstream
@@ -103,14 +105,17 @@ sampling (temperature 1.0, top_p 0.95, top_k 20) at `--max-context 160000`, the 
 the upstream build starts with.
 
 - **Upstream + Windows port:** upstream at the commit this fork merged, plus only the Windows port
-  (build `96da12bb`), given the same host RAM split as the default cache. It has no ngram drafting.
-- **master:** this fork at `e36f7ee0` with the default prefix cache and `--fast-prefill-kernel`.
-- **master + alt cache:** the same build with `--use-alt-prefix-caching` added.
+  (build `96da12bb`), given the same host RAM split as the original cache. It has no ngram
+  drafting.
+- **master:** this fork at `e36f7ee0` with the original prefix cache (then the default, now
+  `--use-original-prefix-caching`) and `--fast-prefill-kernel`.
+- **master + hybrid cache:** the same build with the hybrid prefix cache (then selected with
+  `--use-alt-prefix-caching`, now the default).
 
 Each cell is the mean over the three seeds with the lowest and highest seed in brackets; the
 changes are computed per seed against that seed's upstream run.
 
-| Metric | Upstream + Windows port | master | master + alt cache |
+| Metric | Upstream + Windows port | master | master + hybrid cache |
 |---|---|---|---|
 | Average time to first token (s) | 15.7 (12.4-19.0) | 7.0 (6.6-7.7), −54 % | 3.3 (3.0-3.5), −78 % |
 | Median time to first token (s) | 10.0 (5.9-14.4) | 2.2 (1.8-2.8), −74 % | 0.8 (0.6-1.0), −90 % |
@@ -141,7 +146,7 @@ How to read it:
 - TTFT includes queueing: up to seven requests are in flight on two lanes. The average queue wait
   was 12.8 s / 4.7 s / 2.6 s. Without it, TTFT averaged 2.93 s / 2.38 s / 0.72 s.
 - The cache rows now repeat closely: across seeds, master served 74.4-76.3 % of prompt tokens from
-  cache and the alternative cache 90.1-90.3 %. Before the sessions ran in lock-step, two runs of
+  cache and the hybrid cache 90.1-90.3 %. Before the sessions ran in lock-step, two runs of
   one seed on one master build served 61.6 % and 72.6 %, because a faster or slower turn changed
   which session's prefix was evicted.
 - Output tok/s is decode tokens per second of the engine's own decode time, so prefill and idle
@@ -151,7 +156,7 @@ How to read it:
   and 2 % on any seed; the differences in output tok/s come from acceptance. The fork's ngram drafting supplied 8-11 % of
   its output; upstream has none.
 - With two requests decoding, master's rounds were about 11 % slower than upstream's and its
-  combined output 6 % lower; the alternative-cache arm, on the same build, was 7 % slower per
+  combined output 6 % lower; the hybrid-cache arm, on the same build, was 7 % slower per
   round and even on output. Upstream decoded two requests together for only 25-65 s per seed, so
   its two-request rows rest on little data.
 - The fork's whole-run output rate is higher because it decodes both lanes together in about 40 %
@@ -159,7 +164,7 @@ How to read it:
 - Sampled output differs between arms and seeds (152K-195K completion tokens per run, about 78 %
   thinking); the seed ranges include that variation.
 
-### Earlier A/B: default cache vs upstream (September 2026)
+### Earlier A/B: original cache vs upstream (September 2026)
 
 Both builds served the same model on the same GPU and replayed the same agent-style workload:
 
@@ -200,7 +205,8 @@ Almost all of the gain comes from the prefix-cache changes described under
 also gain output speed from ngram drafting (`--ngram-draft-tokens` / `--ngram-min-match`).
 
 This run predates `--host-cache-mib` and `--fast-prefill-kernel`, so the fork used the older
-separate cache flags shown below. The launch lists are kept as the record of what was measured.
+separate cache flags shown below. The launch lists are kept as the record of what was measured;
+those flags configure the original prefix cache and now also need `--use-original-prefix-caching`.
 
 Launch parameters, this fork:
 
@@ -246,6 +252,10 @@ Each topic below lists everything that affects it, whether written here or taken
 upstream has.
 
 ### Prefix caching and KV memory
+
+Most of the changes below are to upstream's checkpoint catalog, which the fork now runs only with
+`--use-original-prefix-caching`; the default is the
+[hybrid prefix cache](#hybrid-prefix-cache-the-default).
 
 NInfer can skip prefilling a prompt prefix it has already processed, but only from a *complete
 checkpoint*: the saved model state plus the KV cache at that exact point in the prompt. The rules
@@ -334,10 +344,11 @@ prefix scenarios in `ninfer_qwen3_5_prefix_real_test` pass on this fork, includi
 `shared-saturation-reclaim`, `shared-replacement`, `private-checkpoint-pressure` and the four
 `review-*` scenarios, which all fail without these changes.
 
-### Alternative prefix cache: `--use-alt-prefix-caching`
+### Hybrid prefix cache (the default)
 
-An opt-in replacement for the checkpoint catalog above (off by default; the default cache is
-unchanged). Design and status: [hybrid prefix cache](docs/maintainer/hybrid-prefix-cache-spec.md).
+The fork's default prefix cache, replacing the checkpoint catalog above, which
+`--use-original-prefix-caching` selects instead. Design and status:
+[hybrid prefix cache](docs/maintainer/hybrid-prefix-cache-spec.md).
 
 - **KV is cached per 64-token block, keyed by content.** Identical prompt blocks are stored once,
   whichever conversation produced them, so a shared system prompt costs its GPU pages once at any
@@ -346,8 +357,8 @@ unchanged). Design and status: [hybrid prefix cache](docs/maintainer/hybrid-pref
   next turn resumes (the start of the assistant reply), the end of tools and system prompt,
   explicit client cache breakpoints, the end of each answer, and a few points spread back through
   long history. Most of these cost no extra prefill work.
-- **It configures itself.** Add `--use-alt-prefix-caching` and, optionally, `--host-cache-mib N`
-  (default 8192; `0` keeps the cache on the GPU only). Free VRAM becomes GPU cache (`--kv-capacity`
+- **It configures itself.** The only setting is `--host-cache-mib N` (default 8192; `0` keeps
+  the cache on the GPU only). Free VRAM becomes GPU cache (`--kv-capacity`
   defaults to `auto`), and the host budget is one pinned pool that KV blocks and saved states share,
   split by how much prefill time each entry saves. Everything else is derived from
   `--max-concurrency` and `--prefill-chunk`.
@@ -470,7 +481,7 @@ RTX 5090:
   used, once the context holds at least 64 cached tokens per new token (80 for 16-head models). The
   same step then takes 1.06 ms, 4–12× faster from 16K to 180K tokens, for every KV format. With
   ~90K cached tokens, a short follow-up question's time to first token fell from 204 ms to 91 ms
-  (together with fewer prefill splits in `--use-alt-prefix-caching` mode).
+  (together with fewer prefill splits in the hybrid prefix cache).
 - **Kernel tuning from upstream PRs:** partial last tile in the fused SwiGLU TMA route (#264) and
   the sigmoid gate folded into the causal reduce step (#268), both by Michael Dementii; the text
   `rmsnorm_rope` route (#273, Michael Dementii); tuned Q6 34,816×5120 dispatch (#284, by
@@ -667,9 +678,8 @@ ninfer-serve.exe "E:\NInfer-Deploy-V3-output\qwen3_8_27b_nvfp4-quasar-proposal.n
 ```
 
 This is the `LaunchQwen3.8-27B-quasar-dflash2-ngram.bat` configuration with the retention tier
-in its single-knob form: the `.bat`'s `--host-kv-mib` / `--host-state-slots` /
-`--max-long-anchors-per-continuation` / catalog flags are replaced by the one `--host-cache-mib`
-ceiling, which rejects them alongside it.
+in its single-knob form: `--host-cache-mib` is the one pinned host pool that the default hybrid
+prefix cache's KV blocks and state snapshots share.
 
 **[Qwen3.8-27B-NVIDIA-NVFP4-NInferV3](https://huggingface.co/Wallawalla47/Qwen3.8-27B-NVIDIA-NVFP4-NInferV3)**
 on Hugging Face — a single-file `.ninfer` engine artifact of
@@ -693,10 +703,11 @@ ninfer-serve.exe "E:\NInfer-Deploy-V3\qwen3_8_27b_nvfp4-nvidia.ninfer" --host 12
 ```
 
 This is the current `LaunchQwen3.8-27B-nvidia-dflash2-ngram.bat` launch configuration, with the
-retention tier in its single-knob form. At `--max-concurrency 2` this artifact's 52,000 MiB budget
-resolves to 139 Host StateImages of 195,897,344 B — 31 long anchors per continuation — with the
-remaining ≈26,000 MiB given to Host KV; the resolved split is what the `server_start` memory ledger
-reports.
+retention tier in its single-knob form: the default hybrid prefix cache shares the 52,000 MiB
+budget between KV blocks and state snapshots by eviction value. With `--use-original-prefix-caching`
+the same budget resolves, at `--max-concurrency 2`, to 139 Host StateImages of 195,897,344 B — 31
+long anchors per continuation — with the remaining ≈26,000 MiB given to Host KV; the `server_start`
+memory ledger reports the resolved split.
 
 ## Thanks
 
