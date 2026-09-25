@@ -364,9 +364,14 @@ ProgramImpl::reserve_materialization(AdmissionCandidate&& plan, PreparedPromptDa
                 // Overlay: the full tower is absent from VRAM. Items fully inside the reuse
                 // prefix stay resident-encoded on the base lane; only the suffix (use.end >
                 // base) is encoded through the evictable window here.
-                const auto& plan       = *request.prefill->vision_plan;
-                const std::uint32_t suffix_end = plan.control->items.size();
-                std::uint32_t first_needed     = suffix_end;
+                // first_needed and the sentinel below work in absolute prepared-item index
+                // space (plan.control->prepared_item_begin offsets this plan's items inside
+                // the full prepared prompt), matching use.prepared_item_index. set_preencoded
+                // expects prepared_begin + items.size() entries.
+                const auto& plan            = *request.prefill->vision_plan;
+                const std::uint32_t prepared_begin = plan.control->prepared_item_begin;
+                const std::uint32_t item_end       = prepared_begin + plan.control->items.size();
+                std::uint32_t first_needed         = item_end;
                 for (const auto& use : plan.uses) {
                     if (use.end > request.prefill->base && use.prepared_item_index < first_needed) {
                         first_needed = use.prepared_item_index;
@@ -374,12 +379,12 @@ ProgramImpl::reserve_materialization(AdmissionCandidate&& plan, PreparedPromptDa
                 }
                 execution::VisionOverlayWindowStats window_stats;
                 std::vector<execution::PinnedVisionResult> preencoded;
-                if (first_needed < suffix_end) {
+                if (first_needed < item_end) {
                     preencoded = execution::encode_items_overlay(device, parameters,
                                                                  request.prefill->prompt, plan,
                                                                  first_needed, &window_stats);
                 } else {
-                    preencoded.resize(suffix_end);
+                    preencoded.resize(item_end);
                 }
                 request.prefill->vision->set_preencoded(std::move(preencoded), window_stats);
             }
