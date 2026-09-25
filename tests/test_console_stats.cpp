@@ -103,18 +103,26 @@ int main() {
         failures += check(contains(lines[0], "1 done, 2 failed") &&
                               contains(lines[0], "running 1 | waiting 0"),
                           "title must carry request outcomes and live occupancy");
-        failures +=
-            check(contains(lines[1], "DFLASH2 accept") && contains(lines[1], "archive accept"),
-                  "headings must name the drafter and show the archive when used");
+        failures += check(contains(lines[0], "rates in tok/s"),
+                          "title must name the unit the rate cells omit");
+        failures += check(contains(lines[1], "DFLASH2") && contains(lines[1], "archive"),
+                          "headings must name the drafter and show the archive when used");
         const std::string& row = lines[2];
         failures += check(contains(row, "250 ms"), "row must show the mean TTFT");
         failures += check(contains(row, "60.0%"), "row must show the cache-hit ratio");
-        failures += check(contains(row, "2.00k tok/s"), "row must show the prefill rate");
-        failures += check(contains(row, "50.0 tok/s"), "row must show the decode rate");
+        failures += check(contains(row, " 2.00k ") && !contains(row, "tok/s"),
+                          "row must show the prefill rate without repeating its unit");
+        failures += check(contains(row, " 50.0 "), "row must show the decode rate");
         failures += check(contains(row, "40.0%") && contains(row, "4.00"),
                           "row must show model-drafter acceptance and accepted per round");
         failures += check(contains(row, "70.0%") && contains(row, "25.0%"),
                           "row must show n-gram and archive acceptance");
+        // Every column shown, the table still fits a console snapped to half of a 1920-pixel
+        // screen.
+        for (std::size_t index = 1; index < lines.size(); ++index) {
+            failures += check(ninfer::product::terminal_display_width(lines[index]) <= 86,
+                              "panel table must fit a half-width console");
+        }
     }
 
     // The recent row appears once the session outgrows the window and covers only its requests.

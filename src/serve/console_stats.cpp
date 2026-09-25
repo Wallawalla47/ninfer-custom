@@ -27,9 +27,13 @@ std::string ratio_cell(std::uint64_t part, std::uint64_t whole) {
     return product::format_pretty_percent(static_cast<double>(part) / static_cast<double>(whole));
 }
 
+// The title names the tok/s unit once, so a rate cell keeps only its scaled number ("7.46k").
 std::string rate_cell(std::uint64_t tokens, double seconds) {
     if (seconds <= 0.0) { return std::string(kNone); }
-    return product::format_pretty_rate(static_cast<double>(tokens) / seconds, "tok");
+    std::string text = product::format_pretty_rate(static_cast<double>(tokens) / seconds, "tok");
+    constexpr std::string_view kUnit = " tok/s";
+    if (std::string_view(text).ends_with(kUnit)) { text.resize(text.size() - kUnit.size()); }
+    return text;
 }
 
 std::string per_round_cell(std::uint64_t accepted, std::uint64_t rounds) {
@@ -45,11 +49,14 @@ struct Column {
     std::size_t width;
 };
 
-// The row label is left-aligned; every value column is right-aligned under its heading.
-constexpr std::size_t kLabelWidth = 9;
-constexpr Column kColumns[]       = {
-    {"avg TTFT", 10},     {"cache hit", 11}, {"prefill", 14},      {"decode", 13},
-    {"draft accept", 16}, {"acc/round", 11}, {"ngram accept", 14}, {"ngram rounds", 14},
+// The row label is left-aligned; every value column is right-aligned under its heading. The
+// table is 77 columns wide (86 with the archive column), so it fits a console window snapped to
+// half of a 1920-pixel screen.
+constexpr std::size_t kLabelWidth   = 7;
+constexpr std::size_t kArchiveWidth = 9;
+constexpr Column kColumns[]         = {
+    {"TTFT", 8},  {"cached", 8},  {"prefill", 9}, {"decode", 8},
+    {"draft", 9}, {"acc/rnd", 9}, {"ngram", 8},   {"ng rnds", 10},
 };
 constexpr std::size_t kColumnCount   = std::size(kColumns);
 constexpr std::size_t kDrafterColumn = 4; // heading names the configured model drafter
@@ -65,12 +72,12 @@ void append_left(std::string& out, std::string_view text, std::size_t width) {
 }
 
 std::string drafter_heading(SpeculativeBackend backend) {
-    if (backend == SpeculativeBackend::None) { return "draft accept"; }
+    if (backend == SpeculativeBackend::None) { return "draft"; }
     std::string heading = product::speculative_backend_name(backend);
     for (char& ch : heading) {
         ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
     }
-    return heading + " accept";
+    return heading;
 }
 
 std::string render_row(std::string_view label, const ConsoleStatsTotals& totals,
@@ -94,7 +101,8 @@ std::string render_row(std::string_view label, const ConsoleStatsTotals& totals,
         append_right(row, cells[index], kColumns[index].width);
     }
     if (show_archive) {
-        append_right(row, ratio_cell(sum.archive_accepted_tokens, sum.archive_drafted_tokens), 16);
+        append_right(row, ratio_cell(sum.archive_accepted_tokens, sum.archive_drafted_tokens),
+                     kArchiveWidth);
     }
     return row;
 }
@@ -162,11 +170,11 @@ void ConsoleStatsTotals::add(const ConsoleRequestSample& sample) noexcept {
 
 std::vector<std::string> render_console_stats_panel(const ConsoleStatsSnapshot& snapshot) {
     const bool show_archive = snapshot.session.sum.archive_drafted_tokens != 0;
-    std::size_t table_width = 1 + kLabelWidth + (show_archive ? 16 : 0);
+    std::size_t table_width = 1 + kLabelWidth + (show_archive ? kArchiveWidth : 0);
     for (const Column& column : kColumns) { table_width += column.width; }
 
-    std::string title =
-        "-- session stats | " + product::format_pretty_count(snapshot.completed) + " done";
+    std::string title = "-- session stats, rates in tok/s | " +
+                        product::format_pretty_count(snapshot.completed) + " done";
     if (snapshot.failed != 0) {
         title += ", " + product::format_pretty_count(snapshot.failed) + " failed";
     }
@@ -190,7 +198,7 @@ std::vector<std::string> render_console_stats_panel(const ConsoleStatsSnapshot& 
                                              : std::string(column.heading),
                      column.width);
     }
-    if (show_archive) { append_right(headings, "archive accept", 16); }
+    if (show_archive) { append_right(headings, "archive", kArchiveWidth); }
 
     std::vector<std::string> lines;
     lines.reserve(4);

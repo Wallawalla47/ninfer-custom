@@ -942,13 +942,16 @@ more than ten have completed, one over the last ten:
 
 | Column | Aggregate |
 |---|---|
-| avg TTFT | mean time to first token |
-| cache hit | prefix-cache hit tokens / prompt tokens |
-| prefill | computed (non-cached) prompt tokens / prefill seconds |
-| decode | output tokens after the first / decode seconds (per-request rate, not batch throughput) |
-| `<DRAFTER>` accept, acc/round | model-drafter (MTP or DFlash) accepted / drafted tokens, and accepted tokens per model-drafted round; n-gram rounds are excluded |
-| ngram accept, ngram rounds | n-gram accepted / drafted tokens and verification rounds |
-| archive accept | n-gram archive accepted / drafted tokens, shown once the archive has drafted |
+| TTFT | mean time to first token |
+| cached | prefix-cache hit tokens / prompt tokens |
+| prefill | computed (non-cached) prompt tokens / prefill seconds, in tok/s |
+| decode | output tokens after the first / decode seconds, in tok/s (per-request rate, not batch throughput) |
+| `<DRAFTER>`, acc/rnd | model-drafter (MTP or DFlash) accepted / drafted tokens, and accepted tokens per model-drafted round; n-gram rounds are excluded |
+| ngram, ng rnds | n-gram accepted / drafted tokens and verification rounds |
+| archive | n-gram archive accepted / drafted tokens, shown once the archive has drafted |
+
+The table is 77 columns wide, 86 with the archive column, so it fits a console window snapped to
+half of a 1920-pixel screen; a narrower window cuts the rows at its edge.
 
 Ratios and rates divide summed tokens by summed seconds, so each request weighs by its size. The
 title counts completed, failed, cancelled, and rejected requests and, while throughput reporting is
