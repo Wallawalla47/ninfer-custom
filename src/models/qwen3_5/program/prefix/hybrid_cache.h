@@ -216,17 +216,23 @@ private:
         cudaEvent_t done = nullptr;
     };
 
+    // Copies between pages and Host slab records. A record's group is the pinned chunk holding
+    // its slab: a strided transfer never joins records of two chunks.
     struct PageCopies {
         std::vector<DeviceKVPageHandle> text_pages;
         std::vector<std::byte*> text_records;
+        std::vector<std::uint32_t> text_groups;
         std::vector<DeviceKVPageHandle> backend_pages;
         std::vector<std::byte*> backend_records;
+        std::vector<std::uint32_t> backend_groups;
 
         void clear() noexcept {
             text_pages.clear();
             text_records.clear();
+            text_groups.clear();
             backend_pages.clear();
             backend_records.clear();
+            backend_groups.clear();
         }
     };
 
@@ -275,7 +281,8 @@ private:
     HybridHostLayout host_layout_;
     // The Host slab pool is pinned in chunks of whole slabs: one very large pinned allocation
     // can fail or stall on Windows (WDDM) where several smaller ones succeed. A slab never
-    // crosses chunks, and copy runs stop at chunk edges because their addresses stop advancing.
+    // crosses chunks, and every copy record carries its chunk as its group, so a strided copy
+    // run never spans two chunks (two records of different chunks would otherwise form a run).
     std::vector<PinnedHostBuffer> host_chunks_;
     std::uint32_t slabs_per_chunk_ = 0;
     cudaStream_t restore_stream_   = nullptr;

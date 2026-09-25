@@ -412,7 +412,11 @@ struct Snapshot {
   free list is an index stack, O(1). There is no fragmentation and no geometry check: capacity is
   `free_slabs`. A nonzero budget smaller than one snapshot plus one block is rejected at startup.
   The pool is pinned in chunks of at most 4 GiB of whole slabs (one very large pinned allocation can
-  fail or stall under WDDM); a slab never crosses chunks and copy runs stop at chunk edges.
+  fail or stall under WDDM); a slab never crosses chunks. A strided copy run joins consecutive
+  pages only while their slab records share a chunk and advance by one pitch no larger than the
+  device's maximum copy pitch. Any two records form a candidate run, so records in different
+  chunks, or gigabytes apart in one, must be split explicitly. A 52 GB Host tier otherwise produced
+  an invalid `cudaMemcpy2DAsync` that aborted the server.
 
 ### 5.5 Persistence (opt-in)
 

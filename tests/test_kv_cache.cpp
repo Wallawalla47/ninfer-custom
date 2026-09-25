@@ -335,7 +335,7 @@ int exercise_layout_and_transfer(ninfer::DeviceContext& context, ninfer::KVPageG
         const std::array<std::size_t, 5> slab_of{3, 4, 5, 9, 0};
         std::vector<std::byte*> records;
         for (const std::size_t slab : slab_of) { records.push_back(base + slab * pitch); }
-        source.copy_to_host_records(source_handles, records, host_layout, context.stream);
+        source.copy_to_host_records(source_handles, records, {}, host_layout, context.stream);
         context.synchronize();
         bool records_match = true;
         for (std::size_t page = 0; page < records.size(); ++page) {
@@ -352,7 +352,7 @@ int exercise_layout_and_transfer(ninfer::DeviceContext& context, ninfer::KVPageG
         const std::vector<ninfer::DeviceKVPageHandle> record_handles = handles(from_records);
         destination.zero_pages(record_handles, context.stream);
         std::vector<const std::byte*> const_records(records.begin(), records.end());
-        destination.copy_from_host_records(const_records, record_handles, host_layout,
+        destination.copy_from_host_records(const_records, {}, record_handles, host_layout,
                                            context.stream);
         std::optional<ninfer::HostKVAllocation> record_roundtrip =
             host_arena.allocate(host_layout, 5);
@@ -367,8 +367,8 @@ int exercise_layout_and_transfer(ninfer::DeviceContext& context, ninfer::KVPageG
         // restore lands each model layer's planes separately).
         destination.zero_pages(record_handles, context.stream);
         for (std::size_t plane = destination.plane_count(); plane-- > 0;) {
-            destination.copy_from_host_records(const_records, record_handles, host_layout, plane,
-                                               plane + 1, context.stream);
+            destination.copy_from_host_records(const_records, {}, record_handles, host_layout,
+                                               plane, plane + 1, context.stream);
         }
         std::memset(record_view.data(), 0, host_layout.page_stride * 5);
         destination.copy_to_host(record_handles, record_view, context.stream);
@@ -377,17 +377,47 @@ int exercise_layout_and_transfer(ninfer::DeviceContext& context, ninfer::KVPageG
                            label + " per-plane record copies differ from the whole-record copy");
         bool range_rejected = false;
         try {
-            destination.copy_from_host_records(const_records, record_handles, host_layout, 0,
+            destination.copy_from_host_records(const_records, {}, record_handles, host_layout, 0,
                                                destination.plane_count() + 1, context.stream);
         } catch (const std::invalid_argument&) { range_rejected = true; }
         failures += expect(range_rejected, label + " out-of-range plane range accepted");
         bool mismatched_rejected = false;
         try {
             destination.copy_from_host_records(
-                std::span<const std::byte* const>(const_records.data(), 2), record_handles,
+                std::span<const std::byte* const>(const_records.data(), 2), {}, record_handles,
                 host_layout, context.stream);
         } catch (const std::invalid_argument&) { mismatched_rejected = true; }
         failures += expect(mismatched_rejected, label + " record count mismatch accepted");
+
+        // Records in two separate pinned allocations (the hybrid Host tier pins its slabs in
+        // chunks): consecutive pages whose records lie in different groups must not form one
+        // strided transfer across both allocations, whatever the distance between them.
+        ninfer::PinnedHostBuffer first_chunk(host_layout.page_stride * 3);
+        ninfer::PinnedHostBuffer second_chunk(host_layout.page_stride * 2);
+        auto* first_base  = static_cast<std::byte*>(first_chunk.data());
+        auto* second_base = static_cast<std::byte*>(second_chunk.data());
+        std::vector<std::byte*> split{first_base, first_base + host_layout.page_stride,
+                                      first_base + 2 * host_layout.page_stride, second_base,
+                                      second_base + host_layout.page_stride};
+        const std::array<std::uint32_t, 5> split_groups{0, 0, 0, 1, 1};
+        source.copy_to_host_records(source_handles, split, split_groups, host_layout,
+                                    context.stream);
+        destination.zero_pages(record_handles, context.stream);
+        const std::vector<const std::byte*> const_split(split.begin(), split.end());
+        destination.copy_from_host_records(const_split, split_groups, record_handles, host_layout,
+                                           context.stream);
+        std::memset(record_view.data(), 0, host_layout.page_stride * 5);
+        destination.copy_to_host(record_handles, record_view, context.stream);
+        context.synchronize();
+        failures += expect(std::memcmp(record_view.data(), expected.data(), expected.size()) == 0,
+                           label + " records split over two pinned allocations changed bytes");
+        bool groups_rejected = false;
+        try {
+            destination.copy_from_host_records(
+                const_split, std::span<const std::uint32_t>(split_groups.data(), 2), record_handles,
+                host_layout, context.stream);
+        } catch (const std::invalid_argument&) { groups_rejected = true; }
+        failures += expect(groups_rejected, label + " record group count mismatch accepted");
         record_roundtrip->release();
     }
 

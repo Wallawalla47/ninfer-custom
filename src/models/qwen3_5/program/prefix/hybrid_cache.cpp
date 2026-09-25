@@ -269,35 +269,40 @@ std::byte* HybridPrefixCache::slab(std::uint32_t id) const noexcept {
 
 void HybridPrefixCache::add_copies(PageCopies& copies, const HybridBlockPages& pages,
                                    std::uint32_t slab_id) {
-    std::byte* record = slab(slab_id);
+    std::byte* record         = slab(slab_id);
+    const std::uint32_t chunk = slab_id / slabs_per_chunk_;
     copies.text_pages.push_back(text_pages_->physical(pages.text));
     copies.text_records.push_back(record);
+    copies.text_groups.push_back(chunk);
     if (pages.backend) {
         copies.backend_pages.push_back(backend_pages_->physical(*pages.backend));
         copies.backend_records.push_back(record + host_layout_.backend_offset);
+        copies.backend_groups.push_back(chunk);
     }
 }
 
 void HybridPrefixCache::enqueue_to_host(const PageCopies& copies, cudaStream_t stream) const {
     if (!copies.text_pages.empty()) {
-        text_pages_->physical_pool().copy_to_host_records(copies.text_pages, copies.text_records,
-                                                          host_layout_.text, stream);
+        text_pages_->physical_pool().copy_to_host_records(
+            copies.text_pages, copies.text_records, copies.text_groups, host_layout_.text, stream);
     }
     if (!copies.backend_pages.empty()) {
         backend_pages_->physical_pool().copy_to_host_records(
-            copies.backend_pages, copies.backend_records, *host_layout_.backend, stream);
+            copies.backend_pages, copies.backend_records, copies.backend_groups,
+            *host_layout_.backend, stream);
     }
 }
 
 void HybridPrefixCache::enqueue_from_host(const PageCopies& copies, cudaStream_t stream) const {
     if (!copies.text_pages.empty()) {
-        text_pages_->physical_pool().copy_from_host_records(
-            const_records(copies.text_records), copies.text_pages, host_layout_.text, stream);
+        text_pages_->physical_pool().copy_from_host_records(const_records(copies.text_records),
+                                                            copies.text_groups, copies.text_pages,
+                                                            host_layout_.text, stream);
     }
     if (!copies.backend_pages.empty()) {
         backend_pages_->physical_pool().copy_from_host_records(
-            const_records(copies.backend_records), copies.backend_pages, *host_layout_.backend,
-            stream);
+            const_records(copies.backend_records), copies.backend_groups, copies.backend_pages,
+            *host_layout_.backend, stream);
     }
 }
 
@@ -569,8 +574,8 @@ void HybridPrefixCache::submit_restore() {
     enqueue_from_host(restore_.tail_copies, restore_stream_);
     if (!restore_.copies.backend_pages.empty()) {
         backend_pages_->physical_pool().copy_from_host_records(
-            const_records(restore_.copies.backend_records), restore_.copies.backend_pages,
-            *host_layout_.backend, restore_stream_);
+            const_records(restore_.copies.backend_records), restore_.copies.backend_groups,
+            restore_.copies.backend_pages, *host_layout_.backend, restore_stream_);
     }
     if (restore_.image) {
         state_pool_->copy_from_host_segments(
@@ -586,8 +591,9 @@ void HybridPrefixCache::submit_restore() {
             if (!restore_.copies.text_pages.empty()) {
                 const std::size_t begin = layer.index * planes_per_attention_layer_;
                 text_pages_->physical_pool().copy_from_host_records(
-                    const_records(restore_.copies.text_records), restore_.copies.text_pages,
-                    host_layout_.text, begin, begin + planes_per_attention_layer_, restore_stream_);
+                    const_records(restore_.copies.text_records), restore_.copies.text_groups,
+                    restore_.copies.text_pages, host_layout_.text, begin,
+                    begin + planes_per_attention_layer_, restore_stream_);
             }
         } else if (restore_.image) {
             state_pool_->copy_from_host_segments(
