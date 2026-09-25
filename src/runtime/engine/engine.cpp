@@ -8,6 +8,7 @@
 #include "runtime/engine/causal_score_core.h"
 #include "runtime/engine/engine_core.h"
 #include "runtime/engine/context_cache/hybrid_resource_manager.h"
+#include "runtime/engine/diagnostics.h"
 #include "runtime/engine/model_instance.h"
 
 #include <algorithm>
@@ -191,8 +192,9 @@ public:
         device.bind_to_current_thread_noexcept();
         const bool persists = persists_prefix_cache();
         if (persists) {
-            std::fprintf(stderr, "[engine] saving the prefix cache to %s\n",
-                         options.context_cache.hybrid.persistent_file.string().c_str());
+            runtime::publish_diagnostic(
+                options.diagnostic_observer, DiagnosticLevel::Info, "saving the prefix cache to %s",
+                options.context_cache.hybrid.persistent_file.string().c_str());
         }
         // The generation core's orderly stop saves the Host tier before it drops it.
         core.emplace<std::monostate>();
@@ -212,24 +214,28 @@ public:
             const std::optional<models::qwen3_5::HybridCachePersistence> result =
                 active->program->hybrid_shutdown_save();
             if (!result) {
-                std::fprintf(stderr,
-                             "[engine] prefix cache not saved: the Engine did not stop cleanly\n");
+                runtime::publish_diagnostic(
+                    options.diagnostic_observer, DiagnosticLevel::Warning,
+                    "prefix cache not saved: the Engine did not stop cleanly");
                 return;
             }
             const models::qwen3_5::HybridCachePersistence& saved = *result;
             if (saved.ok) {
-                std::fprintf(stderr,
-                             "[engine] prefix cache saved: %llu blocks, %llu snapshots, %.1f MiB "
-                             "in %.1f s\n",
-                             static_cast<unsigned long long>(saved.blocks),
-                             static_cast<unsigned long long>(saved.snapshots),
-                             static_cast<double>(saved.bytes) / 1048576.0, saved.seconds);
+                runtime::publish_diagnostic(options.diagnostic_observer, DiagnosticLevel::Info,
+                                            "prefix cache saved: %llu blocks, %llu snapshots, "
+                                            "%.1f MiB in %.1f s",
+                                            static_cast<unsigned long long>(saved.blocks),
+                                            static_cast<unsigned long long>(saved.snapshots),
+                                            static_cast<double>(saved.bytes) / 1048576.0,
+                                            saved.seconds);
             } else {
-                std::fprintf(stderr, "[engine] prefix cache not saved: %s\n",
-                             saved.message.c_str());
+                runtime::publish_diagnostic(options.diagnostic_observer,
+                                            DiagnosticLevel::Warning, "prefix cache not saved: %s",
+                                            saved.message.c_str());
             }
         } catch (const std::exception& error) {
-            std::fprintf(stderr, "[engine] prefix cache not saved: %s\n", error.what());
+            runtime::publish_diagnostic(options.diagnostic_observer, DiagnosticLevel::Warning,
+                                        "prefix cache not saved: %s", error.what());
         } catch (...) {}
     }
 

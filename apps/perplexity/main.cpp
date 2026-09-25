@@ -6,6 +6,7 @@
 #include "ninfer/engine.h"
 #include "product/logging/logging.h"
 #include "product/logging/pretty_format.h"
+#include "product/logging/engine_diagnostics.h"
 #include "product/logging/startup_log.h"
 
 #include <nlohmann/json.hpp>
@@ -232,6 +233,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     engine_options.kv_cache         = options.kv;
     engine_options.fast_prefill_kernel = options.fast_prefill_kernel;
     engine_options.startup_observer = startup_log.observer();
+    engine_options.diagnostic_observer = ninfer::product::engine_diagnostic_observer(logger);
     ninfer::Engine engine(std::move(engine_options));
     const ninfer::LoadSummary load = engine.load_summary();
     startup_log.engine_ready(load);

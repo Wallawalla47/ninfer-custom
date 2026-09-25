@@ -142,6 +142,27 @@ struct StartupObserver {
     std::function<void(const StartupEvent& event)> callback;
 };
 
+enum class DiagnosticLevel : std::uint8_t {
+    Debug,
+    Info,
+    Warning,
+    Error,
+};
+
+// One runtime diagnostic from the Engine worker: Device KV lease growth, recovery from out of
+// memory or a failed request, and prefix-cache persistence at shutdown.
+struct Diagnostic {
+    DiagnosticLevel level = DiagnosticLevel::Info;
+    std::string message;
+};
+
+struct DiagnosticObserver {
+    // Receives every diagnostic, from the worker thread or the destructor; the product decides
+    // which levels to show. Without a callback, Info and above go to stderr. Callback exceptions
+    // are ignored so a logging failure cannot disturb execution.
+    std::function<void(const Diagnostic& diagnostic)> callback;
+};
+
 // Prefix-cache implementation selected at Engine construction. Legacy is the owner/checkpoint
 // ResourceManager (docs/maintainer/resource-scheduling-and-context-cache.md). Hybrid is the
 // content-addressed block tree with sparse state snapshots
@@ -257,6 +278,7 @@ struct EngineOptions {
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
     StartupObserver startup_observer;
+    DiagnosticObserver diagnostic_observer;
 };
 
 enum class SamplingMode : std::uint8_t {

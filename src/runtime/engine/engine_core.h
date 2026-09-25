@@ -9,6 +9,7 @@
 #include "runtime/contract/resources.h"
 #include "runtime/engine/request_record.h"
 #include "runtime/engine/context_cache/resource_manager.h"
+#include "runtime/engine/diagnostics.h"
 #include "runtime/engine/scheduler.h"
 #include "runtime/engine/generation_budget.h"
 
@@ -103,6 +104,7 @@ public:
                 .session_bytes = options.speculative.ngram_session_bytes,
                 .total_bytes   = options.speculative.ngram_archive_bytes});
         }
+        diagnostics_ = options.diagnostic_observer;
         std::promise<void> startup;
         std::future<void> started = startup.get_future();
         worker_                   = std::thread([this, startup = std::move(startup)]() mutable {
@@ -1718,7 +1720,8 @@ private:
                 *instance_.program, std::move(choice), std::move(request->prompt),
                 CancellationFlagView{&request->cancelled});
         } catch (const std::bad_alloc& oom) {
-            std::fprintf(stderr, "[engine] OOM during materialization reserve: %s\n", oom.what());
+            publish_diagnostic(diagnostics_, DiagnosticLevel::Warning,
+                               "out of memory during materialization reserve: %s", oom.what());
             oom_backoff_ = kOomBackoffIterations;
             ++oom_recovery_count_;
             if (!erase_pending(request)) {
@@ -1980,10 +1983,10 @@ private:
                     *instance_.program, shortfall->main_pages, shortfall->backend_pages);
                 if (instance_.program->resume_device_kv_lease(*request->sequence)) {
                     if (released != 0) {
-                        std::fprintf(stderr,
-                                     "[engine] Device KV lease of lane %u extended: released %u "
-                                     "retained cache owner(s)\n",
-                                     lane, released);
+                        publish_diagnostic(diagnostics_, DiagnosticLevel::Debug,
+                                           "Device KV lease of lane %u extended: released %u "
+                                           "retained cache owner(s)",
+                                           lane, released);
                     }
                     continue;
                 }
@@ -1992,12 +1995,13 @@ private:
                     const auto remaining =
                         instance_.program->device_kv_lease_shortfall(*request->sequence)
                             .value_or(*shortfall);
-                    std::fprintf(stderr,
-                                 "[engine] warning: Device KV lease of lane %u cannot grow after "
-                                 "releasing %u retained cache owner(s); still short %u main / %u "
-                                 "backend pages for its smallest step, so the answer ends early "
-                                 "with output_limit\n",
-                                 lane, released, remaining.main_pages, remaining.backend_pages);
+                    publish_diagnostic(diagnostics_, DiagnosticLevel::Warning,
+                                       "Device KV lease of lane %u cannot grow after releasing "
+                                       "%u retained cache owner(s); still short %u main / %u "
+                                       "backend pages for its smallest step, so the answer ends "
+                                       "early with output_limit",
+                                       lane, released, remaining.main_pages,
+                                       remaining.backend_pages);
                 }
             }
             const std::uint32_t control = request->output.control_suffix_tokens();
@@ -2146,14 +2150,14 @@ private:
         } catch (...) {}
         try { resources_.clear_after_program_cleanup(); } catch (...) {}
         if (leaked) {
-            std::fprintf(stderr,
-                         "[engine] recovery rebuilt the context stores: cleanup left %u main / %u "
-                         "backend Device KV pages (%u / %u leased), %u Device and %u Host "
-                         "StateImages and %zu Host KV bytes without an owner\n",
-                         leaked->device_main_kv_pages, leaked->device_backend_kv_pages,
-                         leaked->device_main_kv_lease_pages,
-                         leaked->device_backend_kv_lease_pages, leaked->device_state_slots,
-                         leaked->host_state_slots, leaked->host_kv_bytes);
+            publish_diagnostic(diagnostics_, DiagnosticLevel::Warning,
+                               "recovery rebuilt the context stores: cleanup left %u main / %u "
+                               "backend Device KV pages (%u / %u leased), %u Device and %u Host "
+                               "StateImages and %zu Host KV bytes without an owner",
+                               leaked->device_main_kv_pages, leaked->device_backend_kv_pages,
+                               leaked->device_main_kv_lease_pages,
+                               leaked->device_backend_kv_lease_pages, leaked->device_state_slots,
+                               leaked->host_state_slots, leaked->host_kv_bytes);
         }
     }
 
@@ -2305,8 +2309,8 @@ private:
                 {
                     char buf[256];
                     buf[0] = '\0';
-                    int n = std::snprintf(buf, sizeof(buf),
-                                          "[engine] WORKER OOM: %s - recovering", oom.what());
+                    int n = std::snprintf(buf, sizeof(buf), "worker out of memory: %s - recovering",
+                                          oom.what());
                     if (n < 0) { n = 0; buf[0] = '\0'; }
                     if (materializing_ && (size_t)n < sizeof(buf)) {
                         n += std::snprintf(buf + n, sizeof(buf) - n, " mat=%llu",
@@ -2319,13 +2323,13 @@ private:
                                                (unsigned long long)slots_[lane]->id);
                         }
                     }
-                    std::fprintf(stderr, "%s\n", buf);
+                    publish_diagnostic(diagnostics_, DiagnosticLevel::Warning, "%s", buf);
                 }
                 if (++oom_recovery_count_ > kOomMaxRecoveries) {
-                    std::fprintf(stderr,
-                                 "[engine] WORKER OOM: %u consecutive recoveries — failing all "
-                                 "pending\n",
-                                 oom_recovery_count_ - 1);
+                    publish_diagnostic(diagnostics_, DiagnosticLevel::Error,
+                                       "worker out of memory: %u consecutive recoveries - failing "
+                                       "all pending",
+                                       oom_recovery_count_ - 1);
                     const std::exception_ptr fatal_error = oom_fallback_error_;
                     fail_all_locked(fatal_error);
                     return;
@@ -2344,11 +2348,12 @@ private:
             } catch (const std::logic_error& logic_err) {
                 // Recoverable logic error (e.g. stale checkpoint state image).
                 // Fail the active/materializing requests but keep the worker alive.
-                std::fprintf(stderr, "[engine] WORKER RECOVER: %s\n", logic_err.what());
+                publish_diagnostic(diagnostics_, DiagnosticLevel::Error,
+                                   "worker recovering from a failed request: %s", logic_err.what());
                 if (++oom_recovery_count_ > kOomMaxRecoveries) {
-                    std::fprintf(stderr,
-                                 "[engine] WORKER: %u consecutive recoveries — failing all\n",
-                                 oom_recovery_count_ - 1);
+                    publish_diagnostic(diagnostics_, DiagnosticLevel::Error,
+                                       "worker: %u consecutive recoveries - failing all",
+                                       oom_recovery_count_ - 1);
                     fail_all_locked(std::current_exception());
                     return;
                 }
@@ -2363,9 +2368,11 @@ private:
                 try {
                     std::rethrow_exception(error);
                 } catch (const std::exception& e) {
-                    std::fprintf(stderr, "[engine] WORKER CRASH: %s\n", e.what());
+                    publish_diagnostic(diagnostics_, DiagnosticLevel::Error, "worker crash: %s",
+                                       e.what());
                 } catch (...) {
-                    std::fprintf(stderr, "[engine] WORKER CRASH: unknown exception\n");
+                    publish_diagnostic(diagnostics_, DiagnosticLevel::Error,
+                                       "worker crash: unknown exception");
                 }
                 HostPhaseMeasurement cleanup = begin_host_phase();
                 fail_all_locked(error);
@@ -2416,6 +2423,7 @@ private:
     std::uint32_t oom_recovery_count_ = 0;  // consecutive OOMs without a successful work unit
     const std::exception_ptr oom_fallback_error_ = std::make_exception_ptr(
         RequestError(RequestErrorKind::Overloaded, "engine out of memory during execution"));
+    DiagnosticObserver diagnostics_;
     std::thread worker_;
 };
 
