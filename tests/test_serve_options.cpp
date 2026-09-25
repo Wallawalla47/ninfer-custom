@@ -509,10 +509,10 @@ int main() {
                           !hybrid_minimal.context_cache.hybrid.tap_min_gap_tokens,
                       "the hybrid default must size KV automatically and leave tuning derived");
     const ServeOptions hybrid_headroom =
-        parse({"ninfer-serve", "model.ninfer", "--kv-headroom-mib", "2048"});
+        parse({"ninfer-serve", "model.ninfer", "--vram-headroom-mib", "2048"});
     failures += check(hybrid_headroom.kv_capacity.mode == ninfer::KvCapacityMode::Automatic &&
                           hybrid_headroom.kv_capacity.automatic_headroom_bytes == (2048ULL << 20),
-                      "hybrid automatic KV capacity must accept --kv-headroom-mib");
+                      "hybrid automatic KV capacity must accept --vram-headroom-mib");
     const ServeOptions hybrid_explicit_kv =
         parse({"ninfer-serve", "model.ninfer", "--max-context", "8192", "--kv-capacity", "16384",
                "--host-cache-mib", "0"});

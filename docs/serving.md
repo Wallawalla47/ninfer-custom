@@ -849,6 +849,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--rope-yarn-factor F` | startup-fixed runtime YaRN factor, finite `[1,4]`; extends allowed ceiling only | `1` |
 | `--max-context N` | logical context ceiling of each sequence | `8192` |
 | `--kv-capacity N\|auto` | explicit shared Main Text KV capacity, or maximize it from remaining GPU memory; omitted means `auto` with the hybrid prefix cache and `--max-context` with `--use-original-prefix-caching` or `--no-prefix-reuse` | `auto` |
+| `--vram-headroom-mib N` | VRAM in MiB that `--kv-capacity auto` leaves free after sizing the KV pool; requires `auto` | `1024` |
 | `--max-concurrency N` | maximum admitted requests; valid range `1..8` | `1` |
 | `--max-pending-requests N` | additional requests allowed to wait for admission | `16` |
 | `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `30000` |
@@ -1149,8 +1150,9 @@ answer quality; validate the workload before deployment.
 
 `--max-context` is each sequence's logical ceiling. `--kv-capacity` fixes the shared Main Text KV
 pool used by active requests and retained prefixes. `auto` accounts for the complete enabled runtime
-and leaves 1 GiB of sizing headroom; omitting the option selects `auto` with the hybrid prefix
-cache and follows `--max-context` with `--use-original-prefix-caching` or `--no-prefix-reuse`. The
+and leaves 1 GiB of sizing headroom (`--vram-headroom-mib`); omitting the option selects `auto`
+with the hybrid prefix cache and follows `--max-context` with `--use-original-prefix-caching` or
+`--no-prefix-reuse`. The
 CUDA Graph driver-state allowance reserved against that budget is 64 MiB plus 4 MiB for every
 decode-graph executable the engine instantiates: one per topology class of each captured family,
 for every batch size up to `--max-concurrency` (DFlash and DFlash2 capture a second family when

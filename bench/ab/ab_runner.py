@@ -88,7 +88,7 @@ BAT_FLAGS = [
     ("--host-kv-mib", "24000"),
     ("--pending-timeout-ms", "900000"),
     ("--prefill-chunk", "2048"),
-    ("--kv-capacity", "auto"), ("--kv-headroom-mib", "0"),
+    ("--kv-capacity", "auto"), ("--vram-headroom-mib", "0"),
     ("--log-colours", "on"),
     ("--host-state-slots", "64"),
     ("--max-private-continuations", "32"),
@@ -534,7 +534,7 @@ def readme_block(ctrl, treat, ctrl_flags, treat_flags, dropped, ctx):
              "it does not support, which are dropped: %s):\n\n```\n%s\n```\n"
              % (", ".join("`%s`" % d for d in dropped), _flag_str(ctrl_flags)))
     L.append("The upstream serve bakes an automatic 1 GiB KV headroom into `--kv-capacity auto` "
-             "that has no flag to lower (the fork's `--kv-headroom-mib 0`), so it cannot start "
+             "that has no flag to lower (the fork's `--vram-headroom-mib 0`), so it cannot start "
              "at the production max-context %s on this card; both arms run at the same "
              "calibrated %d so the arms stay comparable. Thinking is on for both arms "
              "(`--default-thinking-budget` + `--preserve-thinking`; both upstream-supported).\n"
@@ -564,7 +564,7 @@ def compute_report(ctrl, treat, ctrl_flags, treat_flags, dropped, ctx):
     L.append("- **max-context deviation:** the production bat uses %s; both arms run at the "
              "calibrated value %d. The upstream serve cannot start at %s on this 32 GiB card: it "
              "bakes an automatic KV headroom into `--kv-capacity auto` that has no flag to lower "
-             "(the fork's `--kv-headroom-mib 0`), so its minimum KV reservation plus that headroom "
+             "(the fork's `--vram-headroom-mib 0`), so its minimum KV reservation plus that headroom "
              "exceeds the memory free after the weights. Shrinking max-context shrinks the "
              "reservation; the treatment matches the control's context so the arms stay "
              "comparable. Workload prompts are capped at ~140K tokens + output headroom so "

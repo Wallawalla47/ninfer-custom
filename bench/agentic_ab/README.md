@@ -97,7 +97,7 @@ Several workload seeds (`--seeds`) show how much a result depends on the particu
 - **Same context.** Upstream keeps a fixed 1 GiB of VRAM spare under `--kv-capacity auto`, so it
   may not start at the bat's context. The runner tries the bat's value first, then 200000,
   180000, 170000, 160000, and runs every arm at the first one the control starts with. The
-  fork's larger device KV at that context (`--kv-headroom-mib 0` and its measured CUDA Graph
+  fork's larger device KV at that context (`--vram-headroom-mib 0` and its measured CUDA Graph
   allowance) is part of what is being compared and is shown in the report header.
 
 ## Running it
