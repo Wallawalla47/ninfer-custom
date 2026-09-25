@@ -633,8 +633,11 @@ RTX 5090:
   previously undocumented.
 - **`--kv-headroom-mib`** sets how much GPU memory automatic KV sizing leaves spare (upstream
   always leaves 1 GiB).
-- **`--cuda-graph-allowance-mib`** sets the CUDA Graph memory allowance instead of the automatic
-  value.
+- **Measured CUDA Graph allowance.** The automatic allowance is 64 MiB plus 4 MiB per decode-graph
+  executable, sized from the graph memory measured on an RTX 5090 (DFlash2 with n-gram drafting at
+  `--max-concurrency 2` reserves 160 MiB and uses about 62 MiB, where upstream's per-profile
+  estimate reserves 1,920 MiB). Startup reports the memory the graphs actually used and warns
+  when it exceeds the allowance; **`--cuda-graph-allowance-mib`** replaces the automatic value.
 - **`--thinking-budget-message`** sets the message inserted when a request reaches its thinking
   budget.
 - **`--chat-template`** loads the chat template from a file instead of the artifact.
