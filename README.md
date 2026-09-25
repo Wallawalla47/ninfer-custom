@@ -14,11 +14,76 @@ upstream README follows, copied unchanged, under the "Upstream README" heading.
 - reuses cached prompt prefixes far more often in long multi-turn agent sessions, which roughly
   halves time-to-first-token on that kind of workload;
 - has an optional faster prefill kernel for long prompts (`--fast-prefill-kernel`);
+- has an optional alternative prefix cache (`--use-alt-prefix-caching`) that shares KV between
+  conversations by content and keeps it in GPU memory, host RAM and optionally on disk (outlined
+  just below);
 - lets ngram copy drafting run with more than one concurrent request;
 - accepts more tool-call formats and API options used by agent clients such as Claude Code, Qwen
   Code, Codex and Zed;
 - builds and runs natively on Windows;
 - recovers from out-of-memory and planner errors instead of stopping the whole engine.
+
+## The alternative prefix cache at a glance
+
+`--use-alt-prefix-caching` replaces the default checkpoint catalog with a cache designed around
+how Qwen3.5-family models work. Most of their layers are linear-attention (GDN) layers, whose
+recurrent state cannot be rebuilt from the KV cache. So resuming a prompt needs two things: the KV
+of every earlier token, and a saved state at the exact token where the new prompt continues. The
+cache keeps those two things apart and stores each as cheaply as it can. Add `--host-cache-mib N`
+for host RAM (default 8192) and, optionally, `--prefix-cache-file PATH` to keep the cache across
+restarts; everything else is sized automatically.
+
+**What it stores**
+
+- **KV blocks keyed by content.** KV is kept in 64-token blocks in a radix tree. A block is
+  identified by its tokens (and any image it contains) plus the block before it, so the same
+  prefix is stored once however many conversations use it.
+- **Sparse state snapshots.** A snapshot is the model's recurrent state at one token position,
+  anchored on the block path that leads to it. Snapshots are taken only at planned points:
+  - *exact* points split the prefill: the end of the system prompt and tools, client cache
+    breakpoints, and the start of the assistant reply;
+  - *flexible* points cost nothing because they fall on prefill chunk boundaries: the end of the
+    prompt, and a few points spread back through long history;
+  - an *endpoint* snapshot at the end of each answer, which the next turn resumes from when the
+    client echoes the conversation back exactly.
+
+**Where it keeps them**
+
+| Tier | Holds | Evicts |
+|---|---|---|
+| GPU | free VRAM after the model becomes block cache, plus a few snapshot slots | least recently used |
+| Host RAM | one pinned pool (`--host-cache-mib`) shared by blocks and snapshots | by prefill time saved per byte, dead KV first |
+| Disk (optional) | the host tier, saved on shutdown and reloaded at startup | replaced on each save |
+
+A block leaving the GPU is copied to host RAM first when it is worth keeping, so GPU eviction
+usually only drops a copy.
+
+**How a request uses it**
+
+1. Admission walks the tree to the longest cached block path and picks the deepest usable
+   snapshot on it. A cost model chooses between restoring from host RAM and prefilling.
+2. The request reserves its GPU pages and a state slot. Anything held only in host RAM is copied
+   back on a separate stream in layer order. The request starts at once, and each layer waits only
+   for its own data.
+3. Prefill runs from the snapshot, taking new snapshots at the planned points. Its new blocks join
+   the tree as they are committed, so a request that arrives meanwhile can reuse them.
+4. Requests that arrive together with the same new prefix wait for the first one's snapshot
+   instead of all prefilling it.
+5. When the request ends, its blocks are written through to host RAM and its endpoint snapshot is
+   published. Pins keep everything a running request uses out of eviction's reach.
+
+**Where the code is**
+
+- `src/runtime/prefix_cache/`: the block tree and eviction (`prefix_index`), the snapshot
+  planner (`tap_planner`) and the cost model.
+- `src/models/qwen3_5/program/prefix/`: the model side. It covers GPU and host copies
+  (`hybrid_cache`), admission, snapshots and finish (`hybrid_program`), the host memory layout
+  and the cache file.
+- `src/runtime/engine/context_cache/hybrid_resource_manager.h`: the Engine's admission contract.
+
+Features and measurements are described under
+[Alternative prefix cache](#alternative-prefix-cache---use-alt-prefix-caching), and the full design
+in the [hybrid prefix cache spec](docs/maintainer/hybrid-prefix-cache-spec.md).
 
 ## Performance: this fork vs upstream
 
@@ -306,6 +371,16 @@ RTX 5090:
   `rmsnorm_rope` route (#273, Michael Dementii); tuned Q6 34,816×5120 dispatch (#284, by
   [bingchengcc](https://github.com/bingchengcc)); and Q5 linear K-split sized to the token count
   (#292, by [giveen](https://github.com/giveen)).
+- **Kernel changes adapted from [llmq](https://github.com/IST-DASLab/llmq)** (IST-DASLab, Erik
+  Schultheis), from upstream PRs by [DuncanBetts](https://github.com/DuncanBetts):
+  - From 1,024 prompt tokens up, the NVFP4 attention-input projection runs its RMSNorm and
+    activation quantisation in one kernel, skipping one launch and one round trip of the
+    normalised activations through memory (#305). This applies to the NVFP4 artifacts on this page. The
+    output is byte-identical to the separate steps, and the PR measured the norm, quantise and GEMM
+    stage 4–17 µs faster per layer at 1,024–4,096 tokens.
+  - Target log-probabilities (perplexity / CausalScoring) find the maximum and the sum in a single
+    pass over the logits instead of two (#307): about 1.6× faster for that kernel. The results
+    match to within the existing test tolerance.
 
 ### Tool calls and reasoning output
 
@@ -347,6 +422,25 @@ RTX 5090:
   [Hector Ramon Jimenez (hecrj)](https://github.com/hecrj), rewritten for the current source
   layout.
 - **`ignore_eos` on chat completions.** Upstream PR #197 by [Thireus](https://github.com/Thireus).
+- **GitHub Copilot and other agent-host requests are accepted** instead of refused before
+  generation. From upstream PR #316 by [paq85](https://github.com/paq85) (Damian Sromek), with
+  only its serving commits taken:
+  - on chat completions, `custom` tools are served to the model as a function with one string
+    `input`, under the caller's own tool name. `tool_choice` `required`, named or `custom`,
+    `allowed_tools` in `required` mode, `strict: true` and `parallel_tool_calls: false` are
+    accepted but only advisory, because NInfer cannot force a call or constrain the arguments.
+    `reasoning_effort` `default` / `auto` use the server's own setting;
+  - tool names may be up to 256 bytes on every protocol (was 64, or 128 on Messages), because VS
+    Code wraps MCP tools under longer names such as `activate_fallback_mcp_<server>_<tool>`;
+  - a rejected tool name is reported with its value, byte length and exact location in the
+    request;
+  - `--usage-chunk-choice` (opt-in) gives the streamed usage chunk a blank choice, for clients that
+    reject the standard empty `choices` array.
+
+  The PR's tool-call parser rewrite is not merged: it would hide a failed tool call rather than
+  return it as text, which overlaps with this fork's opt-in `--tolerant-tool-calls` and its
+  handling of quoted `<tool_call>` text. Its prefix-cache test change is also left out, because
+  that test here no longer depends on the chat template.
 - **Responses API options used by Codex and Zed Agent:** `reasoning.summary` and
   `include: ["reasoning.encrypted_content"]` are accepted. Upstream PR #295 by
   [Macasacker](https://github.com/Macasacker), based on an earlier PR by

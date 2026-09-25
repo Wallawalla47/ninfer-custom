@@ -237,6 +237,49 @@ int main(int argc, char** argv) {
             require(total > 0, "concurrent copy requests did not engage ngram");
             std::cout << "c2-concurrent lanes=2 combined_ngram_accepted=" << total << "\n";
         }
+
+        // Part 3b: a copy lane and a free-form lane in flight together, so ngram rounds carry a
+        // row without a copy proposal. The copy lane must stay an exact source prefix. With a
+        // masked drafter the free-form row keeps its neural proposal in those rounds instead of
+        // decoding one token: only a final budget-limited round may verify no draft. The copy lane
+        // offers its rewrite-checkpoint capture under the state pressure left by the cached
+        // continuations above, and the free-form lane is admitted during its prefill. Whether that
+        // capture commits or is skipped, the copy lane's later prefill steps must address its own
+        // KV row rather than the row the other lane's staging bound last.
+        {
+            const int seed_a            = 300;
+            const std::string source_a  = make_source(seed_a);
+            const std::string freeform =
+                "Explain in four short sentences how a hash table resolves collisions.";
+            auto handle_a = engine.submit(engine.prepare(copy_prompt(source_a, seed_a)),
+                                          request(256, true));
+            auto handle_b = engine.submit(engine.prepare(freeform_prompt(freeform)),
+                                          request(192, false));
+            const auto result_a = handle_a.wait();
+            const auto result_b = handle_b.wait();
+            const std::string produced_a = assistant_prefix(seed_a) + result_a.content;
+            if (!source_a.starts_with(produced_a)) {
+                const std::size_t at = first_source_difference(source_a, produced_a);
+                const std::size_t from = at > 40 ? at - 40 : 0;
+                std::cerr << "mixed copy lane diverges at byte " << at << " of " << produced_a.size()
+                          << "\n  source:   [" << source_a.substr(from, 80) << "]\n  produced: ["
+                          << produced_a.substr(from, 80) << "]\n";
+            }
+            require(source_a.starts_with(produced_a),
+                    "mixed-round copy lane is not an exact source prefix");
+            require(result_a.speculative.ngram_accepted_tokens > 0,
+                    "mixed-round copy lane did not engage ngram");
+            require(result_b.generated_token_ids.size() >= 64 &&
+                        distinct_tokens(result_b.generated_token_ids) >= 16,
+                    "mixed-round free-form lane output looks degenerate");
+            const bool masked_drafter = backend != "mtp";
+            require(!masked_drafter || result_b.speculative.fallback_steps <= 1,
+                    "mixed-round free-form lane lost its neural proposal in ngram rounds");
+            std::cout << "c2-mixed copy_ngram_accepted=" << result_a.speculative.ngram_accepted_tokens
+                      << " freeform_rounds=" << result_b.speculative.rounds
+                      << " freeform_fallback=" << result_b.speculative.fallback_steps
+                      << " freeform_accepted=" << result_b.speculative.accepted_tokens << "\n";
+        }
         } // if (!baseline)
 
         // Part 4: two concurrent free-form requests with no source in the prompt. This drives the

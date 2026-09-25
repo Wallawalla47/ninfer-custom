@@ -231,6 +231,8 @@ std::string serve_usage_text(const char* argv0) {
            "  --log-level L              pretty stderr verbosity (trace|debug|info|warning|\n"
            "                             error|critical|off; default info)\n"
            "  --cors                     send permissive CORS headers for browser UIs\n"
+           "  --usage-chunk-choice       give the streamed usage chunk a zero-delta choice so\n"
+           "                             strict parsers that reject choices:[] accept it\n"
            "\n"
            "NOTES\n"
            "  --kv-headroom-mib requires --kv-capacity auto (the default with\n"
@@ -555,6 +557,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.tolerant_tool_calls = true;
         } else if (arg == "--cors") {
             options.enable_cors = true;
+        } else if (arg == "--usage-chunk-choice") {
+            options.usage_chunk_choice = true;
         } else if (arg == "--temperature") {
             options.sampling_overrides.temperature =
                 parse_float_in(require_value("--temperature"), "temperature", 0.0f, 2.0f);

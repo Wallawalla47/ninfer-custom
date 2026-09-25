@@ -153,6 +153,14 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     if (plan.persistent.replay_records) {
         replay_records.emplace(backing, *plan.persistent.replay_records);
         replay_fold.emplace(*replay_records, state_images->linear().all_layers_view());
+        if (is_masked_draft_backend(speculative_backend) && ngram_draft_window != 0 &&
+            neural_draft_window != ngram_draft_window) {
+            const std::uint32_t narrow = std::min(neural_draft_window, ngram_draft_window);
+            narrow_replay_records.emplace(
+                replay_records->narrowed(static_cast<std::int32_t>(narrow + 1U)));
+            narrow_replay_fold.emplace(*narrow_replay_records,
+                                       state_images->linear().all_layers_view());
+        }
     }
     if (replay_records.has_value() != (speculative_backend != SpeculativeBackend::None) ||
         replay_fold.has_value() != replay_records.has_value()) {
@@ -214,9 +222,6 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     }
 
     io = qwen3_5::RoundState(backing, plan.persistent.round);
-    if (plan.persistent.round_single) {
-        round_single.emplace(backing, *plan.persistent.round_single);
-    }
     if (io.mtp.has_value() != (speculative_backend == SpeculativeBackend::Mtp)) {
         throw std::logic_error("round-state MTP extension does not match the sequence plan");
     }
@@ -232,16 +237,6 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     }
     if (io.dflash_decode.has_value() != is_masked_draft_backend(speculative_backend)) {
         throw std::logic_error("DFlash decode frame does not match the sequence plan");
-    }
-    const bool single_row_frame_required =
-        is_masked_draft_backend(speculative_backend) && !causal_scoring &&
-        max_concurrency > 1 && ngram_draft_window != 0 &&
-        neural_draft_window != ngram_draft_window;
-    if (round_single.has_value() != single_row_frame_required) {
-        throw std::logic_error("single-row DFlash frame does not match the sequence plan");
-    }
-    if (round_single && !round_single->dflash_decode.has_value()) {
-        throw std::logic_error("single-row DFlash decode frame does not match the sequence plan");
     }
     prefill_hidden = plan.persistent.prefill_hidden.bind(backing);
     if (plan.persistent.score_hidden) {

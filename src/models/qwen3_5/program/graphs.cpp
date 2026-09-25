@@ -255,6 +255,7 @@ void ProgramImpl::prepare_graphs() {
                 dflash_host_ingress->state_source_slots[row]      = capture_state_slot(row);
                 dflash_host_ingress->state_destination_slots[row] = capture_state_slot(row);
                 dflash_host_ingress->sampling[row]                = {};
+                dflash_host_ingress->copy_rows[row]               = 1;
             }
         }
         if (io.mtp_decode) {
@@ -405,20 +406,18 @@ void ProgramImpl::prepare_graphs() {
     if (is_masked_draft_backend(speculative_backend)) {
         for (const bool ngram : {false, true}) {
             if (ngram && ngram_draft_window == 0) { continue; }
-            // A single-row round verifies at the family's own window, on the single-row frame
-            // when that window is narrower than the frame's native width; a batch>1 frame cannot
-            // be narrowed, so its profiles are captured at the frame's native width and consume
-            // it in place. The per-row proposal extent still limits accepted drafts to the
-            // family's window (the drafter's leading drafts are unchanged under a wider causal
-            // proposal).
+            // Every family verifies at its own window for every batch size, on the one frame
+            // viewed at that width, and records ReplaySSM transitions through the record view of
+            // the same width. A batch>1 ngram round also runs the drafter so rows without a copy
+            // keep their neural proposal.
             const std::uint32_t family_window = ngram ? ngram_draft_window : neural_draft_window;
-            const bool narrow_single_row = family_window < draft_window && max_concurrency > 1;
-            qwen3_5::DFlashDecodeState& single_row_frame =
-                narrow_single_row ? *round_single->dflash_decode : *io.dflash_decode;
             const auto prepare_family = [&](std::uint32_t frontier, std::uint32_t batch_size) {
-                const std::uint32_t verify_drafts =
-                    batch_size == 1 ? family_window : draft_window;
-                prepare_representative(frontier, batch_size, verify_drafts, verify_drafts);
+                prepare_representative(frontier, batch_size, family_window, family_window);
+            };
+            const auto family_core = [&] {
+                execution::ExecutionCore core = execution_core();
+                core.replay_records           = round_replay_records(family_window);
+                return core;
             };
             auto& graph_family = ngram ? ngram_graphs : dflash_graphs;
             const auto batch_one_profiles =
@@ -433,12 +432,12 @@ void ProgramImpl::prepare_graphs() {
             device.synchronize();
             {
                 execution::DFlashBatchContext warm_state{
-                    execution_core(), decoder->text_kv,
-                    *dflash,                single_row_frame,
-                    *dflash_host_ingress,   *dflash_host_egress,
+                    family_core(),        decoder->text_kv,
+                    *dflash,              *io.dflash_decode,
+                    *dflash_host_ingress, *dflash_host_egress,
                     state_images->continuation_hidden_store()};
-                warm_state.ngram                    = ngram;
-                warm_state.neural_proposal_drafts   = neural_draft_window;
+                warm_state.ngram                  = ngram;
+                warm_state.neural_proposal_drafts = neural_draft_window;
                 execution::dflash_decode_batch(warm_state, 1, family_window,
                                                dflash_envelopes(code_warm.min, code_warm.max),
                                                code_warm_target, nullptr);
@@ -447,22 +446,18 @@ void ProgramImpl::prepare_graphs() {
 
             graph_family.profiles.reserve(batch_one_profiles.size() * max_concurrency);
             for (std::uint32_t batch_size = 1; batch_size <= max_concurrency; ++batch_size) {
-                const std::uint32_t verify_drafts =
-                    batch_size == 1 ? family_window : draft_window;
-                qwen3_5::DFlashDecodeState& frame =
-                    batch_size == 1 ? single_row_frame : *io.dflash_decode;
                 const auto planned_profiles =
                     batch_size == 1 ? batch_one_profiles
                                     : dflash_graph_profiles(speculative_backend, capacity,
-                                                            verify_drafts, batch_size);
+                                                            family_window, batch_size);
                 validate_graph_profiles(planned_profiles, capacity - 1, "DFlash");
                 execution::DFlashBatchContext dflash_state{
-                    execution_core(), decoder->text_kv,
-                    *dflash,                frame,
-                    *dflash_host_ingress,   *dflash_host_egress,
+                    family_core(),        decoder->text_kv,
+                    *dflash,              *io.dflash_decode,
+                    *dflash_host_ingress, *dflash_host_egress,
                     state_images->continuation_hidden_store()};
-                dflash_state.ngram                    = ngram;
-                dflash_state.neural_proposal_drafts   = neural_draft_window;
+                dflash_state.ngram                  = ngram;
+                dflash_state.neural_proposal_drafts = neural_draft_window;
                 for (const GraphExecutionProfile planned : planned_profiles) {
                     graph_family.profiles.emplace_back();
                     DecodeGraphProfile& profile    = graph_family.profiles.back();
@@ -474,10 +469,10 @@ void ProgramImpl::prepare_graphs() {
                     const ops::CausalAttentionExecutionEnvelope target_envelope{
                         1, static_cast<std::uint32_t>(std::min<std::uint64_t>(
                                capacity,
-                               static_cast<std::uint64_t>(planned.max) + verify_drafts + 1ULL))};
+                               static_cast<std::uint64_t>(planned.max) + family_window + 1ULL))};
 
                     execution::capture_dflash_decode_batch(
-                        dflash_state, static_cast<std::int32_t>(batch_size), verify_drafts,
+                        dflash_state, static_cast<std::int32_t>(batch_size), family_window,
                         dflash_envelopes(planned.min, planned.max), target_envelope,
                         profile.definition);
                 }

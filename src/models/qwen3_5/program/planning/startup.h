@@ -38,11 +38,6 @@ struct PersistentLayout {
     std::optional<GdnReplayRecordLayout> replay_records;
     std::optional<DFlashPersistentLayout> dflash;
     qwen3_5::RoundStateLayout round;
-    // Single-row DFlash decode frame at the frame's native width (plan.draft_window), for the
-    // narrower family's single-row profiles and rounds, which run narrowed via
-    // single_row_prefix. Present when a batch>1 native frame cannot be narrowed and the two
-    // family windows differ.
-    std::optional<qwen3_5::RoundStateLayout> round_single;
     TensorLayout prefill_hidden;
     std::optional<TensorLayout> score_hidden;
     std::optional<TensorLayout> token_counts;

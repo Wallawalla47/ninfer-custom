@@ -667,16 +667,7 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
             if (!dflash || !io.dflash_decode || (backend_kv_cache() && !sequence.kv->backend)) {
                 throw std::logic_error("DFlash prefill state is incomplete");
             }
-            *dflash_host_ingress                       = {};
-            dflash_host_ingress->active_lanes[0]       = static_cast<std::int32_t>(sequence.lane);
-            const StateImageSelectors selectors        = state_selectors(sequence);
-            dflash_host_ingress->state_source_slots[0] = selectors.source;
-            dflash_host_ingress->state_destination_slots[0] = selectors.destination;
-            dflash_host_ingress->dflash_kv_table_rows[0] =
-                sequence.kv->backend ? backend_kv_addresses->bound_row(*sequence.kv->backend) : 0;
-            CUDA_CHECK(cudaMemcpyAsync(io.dflash_decode->ingress.data, dflash_host_ingress,
-                                       sizeof(qwen3_5::DFlashDecodeIngress), cudaMemcpyHostToDevice,
-                                       device.stream));
+            upload_dflash_prefill_controls(sequence);
         }
 
         staged.elapsed_seconds += std::chrono::duration<double>(Clock::now() - started).count();
@@ -770,6 +761,9 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
     std::array<ops::GdnReplayFoldRow, kMaximumConcurrency> fold_rows{};
     std::array<std::int32_t, kMaximumConcurrency> hidden_selectors{};
     bool needs_hidden_correction = false;
+    // One speculative round produced every pending row, at one verify width.
+    const std::uint32_t verify_drafts =
+        lanes.front() < max_concurrency ? requests[lanes.front()].pending.verify_drafts : 0U;
     for (std::size_t row = 0; row < lanes.size(); ++row) {
         const std::uint32_t lane = lanes[row];
         if (lane >= max_concurrency || requests[lane].lifecycle != Lifecycle::Pending ||
@@ -777,6 +771,9 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
             throw std::logic_error("speculative pending batch no longer matches Program state");
         }
         const PendingCandidate& pending = requests[lane].pending;
+        if (pending.verify_drafts == 0 || pending.verify_drafts != verify_drafts) {
+            throw std::logic_error("speculative pending batch mixes verify widths");
+        }
         const SequenceState& sequence   = active_sequence(lane);
         if (sequence.execution_frontier != pending.base_E ||
             sequence.ledger_frontier != pending.base_S ||
@@ -811,8 +808,9 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
     const auto tail_started = Clock::now();
     try {
         timing.resume_submit();
-        replay_fold->execute(std::span<const ops::GdnReplayFoldRow>(fold_rows.data(), lanes.size()),
-                             device.stream);
+        round_replay_fold(verify_drafts)
+            .execute(std::span<const ops::GdnReplayFoldRow>(fold_rows.data(), lanes.size()),
+                     device.stream);
 
         // Sparse acceptance reads counts. Publish only the prefix licensed by the Frontend.
         if (speculative_backend == SpeculativeBackend::DFlash2) {
@@ -822,7 +820,8 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
                 }
                 const auto count = static_cast<std::int32_t>(accepted_tokens[row]);
                 Tensor ids =
-                    io.dflash_decode->licensed_tokens.slice(1, static_cast<std::int32_t>(row), 1)
+                    io.dflash_decode->narrowed(verify_drafts)
+                        .licensed_tokens.slice(1, static_cast<std::int32_t>(row), 1)
                         .slice(0, 0, count)
                         .view({count});
                 Tensor counts =
@@ -845,7 +844,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
                 selected     = frame.target_continuation_hidden.slice(1, 0, batch);
                 destinations = frame.state_destination_slots.slice(0, 0, batch);
             } else if (is_masked_draft_backend(speculative_backend) && io.dflash_decode) {
-                qwen3_5::DFlashDecodeState& frame = *io.dflash_decode;
+                const qwen3_5::DFlashDecodeState frame = io.dflash_decode->narrowed(verify_drafts);
                 selector_tensor                   = frame.proposal_extents.slice(0, 0, batch);
                 hidden                            = frame.target_hidden.slice(2, 0, batch);
                 selected     = frame.target_continuation_hidden.slice(1, 0, batch);
@@ -897,7 +896,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
     }
 
     const double tail_seconds = std::chrono::duration<double>(Clock::now() - tail_started).count();
-    const std::uint32_t width = draft_window + 1U;
+    const std::uint32_t width = verify_drafts + 1U;
     try {
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence = active_sequence(lanes[row]);
@@ -1079,6 +1078,9 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                                                     : workspace_plan.text_prefill);
             if (is_masked_draft_backend(speculative_backend)) {
                 mark_workspace_usage(workspace_plan.dflash_context);
+                // Decode rounds and other prefills rewrite the shared DFlash frame controls
+                // between steps; this step's feature sink reads its lane from row 0.
+                upload_dflash_prefill_controls(sequence);
             }
             std::uint32_t remaining          = nominal;
             std::uint32_t final_chunk_tokens = 0;
