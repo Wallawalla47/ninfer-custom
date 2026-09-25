@@ -849,6 +849,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--prefill-chunk N` | text-prefill chunk | `1024` |
 | `--fast-prefill-kernel` | prefill INT8-KV prompt attention with the fast kernel (FP16 per-tile PV accumulation) and round `--prefill-chunk` down to whole prompt-attention waves (896 tokens for the 24-head model on RTX 5090: `4096` runs as `3584`); other KV formats keep their kernel | off |
 | `--log-stats-interval-ms N` | aggregate throughput report interval; `0` disables it | `5000` |
+| `--log-stats-panel on\|off` | pin the session statistics panel beneath the console log on an interactive terminal | `on` |
 | `--log-level trace\|debug\|info\|warning\|error\|critical\|off` | pretty stderr verbosity | `info` |
 | `--device N` | CUDA device index | `0` |
 | `--context-cost-presets FILE` | optional runtime context-cost preset registry | generic + compiled defaults |
@@ -925,7 +926,28 @@ Serve writes human-readable operational records to stderr using
 readiness, request lifecycle, fixed-interval throughput, and shutdown; `--log-level debug` exposes
 internal startup and resource-planning detail. A terminal may use one transient line during startup,
 but Serve throughput is always a persistent record. Redirected stderr contains no terminal control
-sequences. Pretty values use readable units and rounded rates; use the independent request JSONL for
+sequences.
+
+On an interactive terminal that accepts VT cursor control, and at `info` verbosity or more, Serve
+pins a session statistics panel beneath the scrolling records (`--log-stats-panel off` removes it).
+Records scroll above it and remain in the scrollback; the panel is redrawn after each record and
+left on screen as ordinary output at exit. It has one row over every completed request and, once
+more than ten have completed, one over the last ten:
+
+| Column | Aggregate |
+|---|---|
+| avg TTFT | mean time to first token |
+| cache hit | prefix-cache hit tokens / prompt tokens |
+| prefill | computed (non-cached) prompt tokens / prefill seconds |
+| decode | output tokens after the first / decode seconds (per-request rate, not batch throughput) |
+| `<DRAFTER>` accept, acc/round | model-drafter (MTP or DFlash) accepted / drafted tokens, and accepted tokens per model-drafted round; n-gram rounds are excluded |
+| ngram accept, ngram rounds | n-gram accepted / drafted tokens and verification rounds |
+| archive accept | n-gram archive accepted / drafted tokens, shown once the archive has drafted |
+
+Ratios and rates divide summed tokens by summed seconds, so each request weighs by its size. The
+title counts completed, failed, cancelled, and rejected requests and, while throughput reporting is
+enabled, the current running and waiting requests. The panel only reads the same outcomes as the
+`req#N done` records; it changes no request behavior. Pretty values use readable units and rounded rates; use the independent request JSONL for
 complete fields and full precision. Operational records never contain prompts, generated text,
 request bodies, credentials, or arbitrary client error messages.
 If a tool marker is returned to text because its structure or tool identity cannot be represented,

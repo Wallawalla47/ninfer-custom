@@ -623,6 +623,10 @@ RTX 5090:
 ### Options and console
 
 - **`--log-colours`** colours the console statistics (throughput, cache reuse, memory).
+- **Session statistics panel.** On an interactive terminal the serve console pins a panel beneath
+  the scrolling log with session and last-ten averages of TTFT, cache hit rate, non-cached prefill
+  and decode speed, model-drafter (MTP/DFlash) acceptance and n-gram acceptance
+  (`--log-stats-panel off` removes it).
 - **Grouped help screens.** `--help` groups options into sections (Context, KV Cache,
   Speculative Decoding, Vision, Sampling, Networking & Resources, …) and covers flags that were
   previously undocumented.
