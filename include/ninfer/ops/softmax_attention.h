@@ -25,6 +25,11 @@ struct CausalAttentionExecutionEnvelope {
     // launches over an INT8-G64 cache. Other routes and cache formats ignore it; it never changes
     // the route or workspace.
     bool fast_prompt_kernel = false;
+    // Single-row prefill: widths 17 through 64 take the chunked small-T route once the visible
+    // keys make it faster than the prompt route. The prompt route runs one CTA per query head and
+    // row block, so a few query rows over a long context leave most SMs idle; small-T splits the
+    // keys across CTAs instead. Workspace planning and execution must use the same hint.
+    bool small_prefill = false;
 };
 
 struct ContextAttentionExecutionEnvelope {

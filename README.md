@@ -195,14 +195,50 @@ prefix scenarios in `ninfer_qwen3_5_prefix_real_test` pass on this fork, includi
 `shared-saturation-reclaim`, `shared-replacement`, `private-checkpoint-pressure` and the four
 `review-*` scenarios, which all fail without these changes.
 
+### Alternative prefix cache: `--use-alt-prefix-caching`
+
+An opt-in replacement for the checkpoint catalog above (off by default; the default cache is
+unchanged). Design and status: [hybrid prefix cache](docs/maintainer/hybrid-prefix-cache-spec.md).
+
+- **KV is cached per 64-token block, keyed by content.** Identical prompt blocks are stored once,
+  whichever conversation produced them, so a shared system prompt costs its GPU pages once at any
+  concurrency.
+- **Saved model state is sparse.** The recurrent state is saved only at useful points: where the
+  next turn resumes (the start of the assistant reply), the end of tools and system prompt,
+  explicit client cache breakpoints, the end of each answer, and a few points spread back through
+  long history. Most of these cost no extra prefill work.
+- **It configures itself.** Add `--use-alt-prefix-caching` and, optionally, `--host-cache-mib N`
+  (default 8192; `0` keeps the cache on the GPU only). Free VRAM becomes GPU cache (`--kv-capacity`
+  defaults to `auto`), and the host budget is one pinned pool that KV blocks and saved states share,
+  split by how much prefill time each entry saves. Everything else is derived from
+  `--max-concurrency` and `--prefill-chunk`.
+- **Restores from host RAM overlap the request's own prefill.** A request resuming from host RAM
+  starts at once: each model layer waits only for its own restored data. The request computes early
+  layers while later ones are still being copied, so a long restored context costs little more than
+  its new tokens.
+- **Parallel requests with a new shared prefix prefill it once.** When requests share a prefix
+  that is not cached yet, such as subagents started together with the same system prompt, later
+  requests wait for the first one's saved state at the point where the prompts diverge. They
+  resume from it instead of prefilling the prefix again. Four requests with a new 13.9K-token
+  system prompt: mean time to first token 1.48 s instead of 3.52 s.
+- **The cache can survive a restart.** With `--prefix-cache-file PATH` (for example
+  `--prefix-cache-file "e:\NInfer-Deploy-V3\file.cache"`), the host RAM part of the cache is read
+  from that file at startup if it exists, and written back when the server shuts down with Ctrl+C
+  or Ctrl+Break, or when its console window is closed. Long conversations and system prompts then
+  resume instead of re-prefilling. Without the flag nothing is saved. A file from a different
+  model, KV format or `ninfer-serve` build is ignored and replaced at shutdown.
+  - Windows ends a closing console's process about 5 seconds after the close. A save that has not
+    finished by then is abandoned and the previous file is kept. At about 3 GB/s that covers a few
+    GiB of cache; for larger caches, stop the server with Ctrl+C, which has no time limit.
+
 ### Faster prefill: `--fast-prefill-kernel`
 
 An opt-in flag (off by default) on `ninfer-serve`, `ninfer-perplexity` and `ninfer_bench` that
 speeds up prefill with `--kv-dtype int8`, especially for long prompts. Without it, nothing
 changes. With it:
 
-- **A faster attention kernel for prompts.** Every prefill step wider than 16 tokens uses a new
-  INT8 prompt-attention kernel
+- **A faster attention kernel for prompts.** Every prefill step wider than 16 tokens (wider than
+  64 once the context is long, see below) uses a new INT8 prompt-attention kernel
   (`src/ops/softmax_attention/dense/causal_cache/prompt_i8_fast.cuh`), written in the style of
   FlashAttention-2:
   - each warp keeps its 16 query rows, scores and output in registers for the whole pass over
@@ -256,6 +292,15 @@ RTX 5090:
   admissions until it finishes. Here new requests can be admitted to free lanes while others are
   prefilling, so one request's prefill overlaps other requests' prefill and decode. Each step still
   advances one prefilling request.
+- **Short prefill steps over long contexts use split-KV attention.** A prefill step of 17–64 new
+  tokens (a user message or a chat template's closing tokens) against a long context used the
+  prompt-attention kernel. That kernel runs one thread block per query head and row block, so it
+  left most of the GPU idle: 32 new tokens against 180K cached tokens took 9.5 ms per attention
+  layer. Such steps now use the chunked split-KV kernels that speculative verification already
+  used, once the context holds at least 64 cached tokens per new token (80 for 16-head models). The
+  same step then takes 1.06 ms, 4–12× faster from 16K to 180K tokens, for every KV format. With
+  ~90K cached tokens, a short follow-up question's time to first token fell from 204 ms to 91 ms
+  (together with fewer prefill splits in `--use-alt-prefix-caching` mode).
 - **Kernel tuning from upstream PRs:** partial last tile in the fused SwiGLU TMA route (#264) and
   the sigmoid gate folded into the causal reduce step (#268), both by Michael Dementii; the text
   `rmsnorm_rope` route (#273, Michael Dementii); tuned Q6 34,816×5120 dispatch (#284, by

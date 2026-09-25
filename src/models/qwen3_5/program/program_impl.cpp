@@ -318,6 +318,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     work.reset();
     work.reset_peak();
     workspace_logical_peak_bytes = 0;
+    create_hybrid_prefix_cache(startup_observer);
 }
 
 ProgramImpl::~ProgramImpl() noexcept {

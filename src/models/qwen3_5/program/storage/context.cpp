@@ -1007,20 +1007,12 @@ bool ProgramImpl::clear_lane_strict(SequenceState& sequence, RequestControl& req
     } catch (...) { return false; }
     const auto* begin                = continuation_states.data();
     const std::uint32_t continuation = static_cast<std::uint32_t>(&sequence - begin);
+    hybrid_release_lane(sequence.lane);
     release_active_shared_references_strict(sequence);
     release_active_sequence_kv_strict(sequence);
     release_active_sequence_state_strict(sequence);
     retire_continuation_slot(continuation);
-    request.prefill.reset();
-    request.lifecycle            = Lifecycle::Empty;
-    request.pending              = {};
-    request.active_resources     = {};
-    request.optional_resources   = {};
-    request.publish_continuation = true;
-    request.lease_settled        = false;
-    request.lease_space_limited  = false;
-    request.lease_minimum_target = {};
-    request.lease_ceiling        = 0;
+    request.retire();
     return true;
 }
 
@@ -1039,16 +1031,8 @@ void ProgramImpl::clear_execution_failure_lanes(std::span<const std::uint32_t> l
 
 void ProgramImpl::clear_lane_best_effort(SequenceState& sequence,
                                          RequestControl& request) noexcept {
-    request.prefill.reset();
-    request.lifecycle            = Lifecycle::Empty;
-    request.pending              = {};
-    request.active_resources     = {};
-    request.optional_resources   = {};
-    request.publish_continuation = true;
-    request.lease_settled        = false;
-    request.lease_space_limited  = false;
-    request.lease_minimum_target = {};
-    request.lease_ceiling        = 0;
+    hybrid_release_lane(sequence.lane);
+    request.retire();
     const auto* begin            = continuation_states.data();
     const auto* end              = begin + continuation_capacity;
     if (&sequence >= begin && &sequence < end) {
@@ -1625,6 +1609,7 @@ void ProgramImpl::commit_sequence_kv(SequenceState& sequence, std::uint32_t main
     if (sequence.kv->backend) {
         backend_kv_addresses->commit_frontier(*sequence.kv->backend, backend_tokens);
     }
+    if (hybrid_) { hybrid_publish_blocks(sequence); }
 }
 
 void ProgramImpl::trim_sequence_kv(SequenceState& sequence, std::uint32_t main_tokens,

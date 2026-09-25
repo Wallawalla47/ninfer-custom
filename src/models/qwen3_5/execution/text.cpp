@@ -1103,6 +1103,9 @@ void TextContext::run_layers(Tensor& x, Phase ph, Tap& tap) {
                  : (prefill ? nvtx::Name::PrefillLayerGdn : nvtx::Name::VerifyLayerGdn),
             full ? nvtx::Category::Attention : nvtx::Category::Gdn, layer);
         try {
+            if (layer < layer_ready_.size()) {
+                CUDA_CHECK(cudaStreamWaitEvent(ctx_.stream, layer_ready_[layer], 0));
+            }
             {
                 nvtx::ScopedRange mixer_range(
                     full ? (prefill ? nvtx::Name::PrefillAttention : nvtx::Name::VerifyAttention)
@@ -1131,6 +1134,8 @@ void TextContext::run_layers(Tensor& x, Phase ph, Tap& tap) {
                                      " columns=" + std::to_string(x.ne[1]) + ": " + error.what());
         }
     }
+    // Later passes are stream-ordered behind this one.
+    layer_ready_ = {};
 }
 
 void TextContext::run_layers(Tensor& x, Phase ph) {
@@ -1259,8 +1264,11 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
             ScopedPositions scoped_cache(active_cache_positions_, positions);
             ScopedPositions scoped_rope(active_rope_positions_, rope_positions);
             const auto visible = static_cast<std::uint32_t>(base_i + t0 + len);
-            const ops::CausalAttentionExecutionEnvelope chunk_envelope{visible, visible, false,
-                                                                       fast_prefill_kernel_};
+            const ops::CausalAttentionExecutionEnvelope chunk_envelope{.min_visible_keys = visible,
+                                                                       .max_visible_keys = visible,
+                                                                       .fast_prompt_kernel =
+                                                                           fast_prefill_kernel_,
+                                                                       .small_prefill = true};
             ScopedEnvelope scoped_envelope(active_causal_attention_envelope_, chunk_envelope);
 
             Tensor x = roots.residual;

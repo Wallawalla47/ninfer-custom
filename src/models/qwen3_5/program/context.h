@@ -55,6 +55,9 @@ struct PrefillContext {
     std::int32_t state_destination_slot                     = 0;
     std::uint32_t mtp_proposal_extent                       = 0;
     const qwen3_5::DFlashDecodeIngress* dflash_host_ingress = nullptr;
+    // Per-model-layer events of a Host restore still landing: the chunk's first pass over the
+    // layer stack waits for each layer's copies.
+    std::span<const cudaEvent_t> layer_ready;
 };
 
 struct OrdinaryBatchContext {

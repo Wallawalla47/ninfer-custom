@@ -132,6 +132,7 @@ struct AttentionCase {
     // scales whose FP16 partial products would leave the FP16 range.
     float value_scale       = 1.0f;
     bool fast_prompt_kernel = false;
+    bool small_prefill      = false;
 };
 
 enum class MappingPattern { Identity, Offset, Fragmented };
@@ -1768,7 +1769,7 @@ int run_a1_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
     }
     const ops::CausalAttentionExecutionEnvelope envelope{
         static_cast<std::uint32_t>(total), test_case.envelope_max, test_case.wide_verification,
-        test_case.fast_prompt_kernel};
+        test_case.fast_prompt_kernel, test_case.small_prefill};
 
     const HostCache initial =
         make_cache(geometry, storage, max_context, test_case.seed + 10u, test_case.value_scale);
@@ -1864,7 +1865,7 @@ int run_a3_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
     }
     const ops::CausalAttentionExecutionEnvelope envelope{
         static_cast<std::uint32_t>(total), test_case.envelope_max, test_case.wide_verification,
-        test_case.fast_prompt_kernel};
+        test_case.fast_prompt_kernel, test_case.small_prefill};
 
     const HostCache cache_host =
         make_cache(geometry, storage, max_context, test_case.seed + 10u, test_case.value_scale);
@@ -2353,6 +2354,29 @@ int run_wide_copy_cases(KvCacheStorage storage, bool fast = false) {
                             with(AttentionCase{width, 8192, static_cast<unsigned>(8192 + width),
                                                2104u, false, true}),
                             MappingPattern::Fragmented);
+        }
+        // Single-row prefill with the small-prefill hint: widths 17-64 over a long context take
+        // chunked small-T, a short context and widths outside 17-64 keep their routes, and the
+        // route threshold (64 or 80 visible keys per row) is crossed from both sides. Every case
+        // is an append-entry prefill checked against the ideal attention and the appended cache.
+        const unsigned keys_per_row = geometry.q_heads == 16 ? 80u : 64u;
+        const auto prefill          = [&](int width, int base, unsigned seed) {
+            AttentionCase test_case{width, base, static_cast<unsigned>(base + width), seed};
+            test_case.small_prefill = true;
+            return with(test_case);
+        };
+        for (int width : {16, 17, 24, 33, 48, 64, 65}) {
+            failures += run_a1_case(geometry, storage, prefill(width, 8192, 2201u),
+                                    MappingPattern::Fragmented);
+            failures +=
+                run_a1_case(geometry, storage, prefill(width, 31, 2202u), MappingPattern::Offset);
+        }
+        for (int width : {17, 40, 64}) {
+            const int threshold = width * static_cast<int>(keys_per_row);
+            for (int visible : {threshold - 1, threshold}) {
+                failures += run_a1_case(geometry, storage, prefill(width, visible - width, 2203u),
+                                        MappingPattern::Fragmented);
+            }
         }
     }
     return failures;
