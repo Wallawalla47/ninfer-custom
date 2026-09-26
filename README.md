@@ -83,6 +83,27 @@ ninfer-serve.exe qwen3_8_27b_nvfp4-nvidia.ninfer --host 127.0.0.1 --port 8080 --
 Add `--prefix-cache-file PATH` to keep the prefix cache across restarts (stop the server with
 Ctrl+C). `ninfer-serve.exe --help` lists every option by category.
 
+## Quick start (Linux)
+
+The fork builds and runs on 64-bit Linux too, including WSL2 (tested on Ubuntu 24.04 under WSL2
+with CUDA 13.4 and GCC 13.3). Prerequisites: a CUDA 13 toolkit, CMake 3.28 or newer, a C++20
+compiler, Ninja, `pkg-config`, and the FFmpeg and curl development packages. On Ubuntu 24.04:
+
+```bash
+sudo apt-get install -y build-essential cmake ninja-build pkg-config libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libcurl4-openssl-dev
+cmake --preset release
+cmake --build build -j
+```
+
+The server is `build/apps/ninfer-serve` and takes the same options as on Windows, for example the
+launch line above with `./build/apps/ninfer-serve` in place of `ninfer-serve.exe`.
+
+Under WSL2 the GPU driver is the Windows NVIDIA driver (580 or later); do not install a Linux NVIDIA
+driver inside WSL. NVIDIA's `wsl-ubuntu` CUDA repository stops at CUDA 13.3, so for 13.4 add its
+`ubuntu2404` repository and install only `cuda-toolkit-13-4` (not `cuda` or `cuda-drivers`, which
+pull in a driver). Artifacts on a Windows drive load slowly through `/mnt/`, so copy the `.ninfer`
+file into the Linux filesystem first.
+
 ## Performance: this fork vs upstream
 
 Both benchmarks below compare this fork with **upstream + Windows port**: upstream at the commit
@@ -475,6 +496,10 @@ Against the flag off (Qwen3.8-27B NVIDIA NVFP4, int8 KV): new-prompt prefill +3.
 - **Running on another PC** needs an RTX 50-series GPU (the build targets `sm_120a`) and an NVIDIA
   driver of 580 or later (CUDA 13); no CUDA toolkit is needed. Copy the DLLs next to
   `ninfer-serve.exe` and install the Visual C++ redistributable if it is missing.
+- **Linux still builds and runs** (see [Quick start (Linux)](#quick-start-linux)), checked under
+  WSL2 Ubuntu 24.04 with CUDA 13.4: 140 of the 141 unit and GPU tests pass (the other, a very long
+  numerical check, ran past its time limit) and the server answers exactly as on Windows. Commit:
+  [`3a47385`](https://github.com/Wallawalla47/ninfer-custom/commit/3a473853).
 
 ### Options and console
 
