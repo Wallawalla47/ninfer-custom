@@ -38,7 +38,7 @@ public:
                           std::size_t max_tool_name_length);
 
     [[nodiscard]] bool in_tool_region() const noexcept {
-        return saw_tool_marker_ || marker_prefix_bytes_ != 0;
+        return saw_tool_marker_ || !pending_tag_.empty();
     }
     [[nodiscard]] std::string feed(std::string_view text);
     void initialize_continuation(std::string_view prefix);
@@ -48,7 +48,7 @@ private:
     std::shared_ptr<const ToolCallOutputContract> contract_;
     std::string trailing_whitespace_;
     std::string tool_region_;
-    std::size_t marker_prefix_bytes_         = 0;
+    std::string pending_tag_;
     std::size_t max_tool_name_length_        = 0;
     bool saw_tool_marker_                    = false;
     bool finished_                           = false;
