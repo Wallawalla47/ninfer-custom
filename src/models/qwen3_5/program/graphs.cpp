@@ -238,11 +238,14 @@ void ProgramImpl::prepare_graphs() {
             const std::uint32_t extent =
                 std::min(capture_proposal_drafts, capacity - frontier - 1U);
             const std::uint32_t width = capture_drafts + 1U;
-            for (std::uint32_t step = 0; step < capture_drafts; ++step) {
-                dflash_host_ingress->ngram_q[step * ops::kSparseSpeculativeCandidates] = 1.0F;
-                for (std::uint32_t slot = 0; slot < ops::kSparseSpeculativeCandidates; ++slot) {
-                    dflash_host_ingress
-                        ->ngram_candidates[step * ops::kSparseSpeculativeCandidates + slot] = slot;
+            for (std::uint32_t row = 0; row < batch_size; ++row) {
+                for (std::uint32_t step = 0; step < capture_proposal_drafts; ++step) {
+                    const auto base = row * capture_drafts * ops::kSparseSpeculativeCandidates +
+                                      step * ops::kSparseSpeculativeCandidates;
+                    dflash_host_ingress->ngram_q[base] = 1.0F;
+                    for (std::uint32_t slot = 0; slot < ops::kSparseSpeculativeCandidates; ++slot) {
+                        dflash_host_ingress->ngram_candidates[base + slot] = slot;
+                    }
                 }
             }
             for (std::uint32_t row = 0; row < batch_size; ++row) {
@@ -267,6 +270,7 @@ void ProgramImpl::prepare_graphs() {
                 dflash_host_ingress->state_source_slots[row]      = capture_state_slot(row);
                 dflash_host_ingress->state_destination_slots[row] = capture_state_slot(row);
                 dflash_host_ingress->sampling[row]                = {};
+                dflash_host_ingress->copy_rows[row]               = 1;
             }
         }
         if (io.mtp_decode) {
@@ -377,16 +381,25 @@ void ProgramImpl::prepare_graphs() {
     if (speculative_backend != SpeculativeBackend::None) {
         using execution::SpeculativePhase;
         const bool mtp = speculative_backend == SpeculativeBackend::Mtp;
+        // MTP has one family pair at the frame's native width. The frame is allocated once at
+        // plan.draft_window (the wider of the neural and ngram windows) and every MTP round
+        // verifies at that width, so an ngram engine reuses it for copy and free-form rounds.
+        // DFlash has a pair per window: each verifies at its own width for every batch size, on
+        // the one frame viewed at that width, and records ReplaySSM transitions through the
+        // record view of the same width. A batch>1 ngram round also runs the drafter so rows
+        // without a copy keep their neural proposal.
+        const std::uint32_t ar_depth = std::min(draft_window, kMtpDecodeMaximumDrafts);
         for (const bool ngram : {false, true}) {
-            if (ngram && ngram_draft_window == 0) { continue; }
-            const std::uint32_t verify_drafts = ngram ? ngram_draft_window : neural_draft_window;
+            if (ngram && (mtp || ngram_draft_window == 0)) { continue; }
+            const std::uint32_t verify_drafts =
+                mtp ? draft_window : (ngram ? ngram_draft_window : neural_draft_window);
             const auto prepare = [&, verify_drafts](std::uint32_t frontier, std::uint32_t batch) {
                 prepare_representative(frontier, batch, verify_drafts, verify_drafts);
             };
             auto& forward_family = ngram ? ngram_forward_graphs : speculative_forward_graphs;
             auto& finish_family  = ngram ? ngram_finish_graphs : speculative_finish_graphs;
             const auto forward_profiles =
-                mtp ? mtp_graph_profiles(capacity, verify_drafts, neural_draft_window)
+                mtp ? mtp_graph_profiles(capacity, verify_drafts, ar_depth)
                     : dflash_graph_profiles(speculative_backend, capacity, verify_drafts);
             // DFlash acceptance has no context-dependent nodes or resource envelope.
             const auto finish_profiles =
@@ -401,11 +414,13 @@ void ProgramImpl::prepare_graphs() {
                                                  *mtp_host_ingress,
                                                  *mtp_host_egress,
                                                  state_images->continuation_hidden_store()};
-                state.neural_proposal_drafts = neural_draft_window;
+                state.neural_proposal_drafts = ar_depth;
                 return state;
             };
             const auto dflash_context = [&] {
-                execution::DFlashBatchContext state{execution_core(),
+                execution::ExecutionCore core = execution_core();
+                core.replay_records           = round_replay_records(verify_drafts);
+                execution::DFlashBatchContext state{core,
                                                     decoder->text_kv,
                                                     *dflash,
                                                     *io.dflash_decode,
@@ -424,43 +439,44 @@ void ProgramImpl::prepare_graphs() {
                            capacity, static_cast<std::uint64_t>(frontier) + verify_drafts + 1ULL))};
             };
             const auto mtp_envelopes = [&](std::uint32_t frontier) {
-                return mtp_causal_attention_envelopes(frontier, verify_drafts, capacity,
-                                                      neural_draft_window);
+                return mtp_causal_attention_envelopes(frontier, verify_drafts, capacity, ar_depth);
             };
             const auto run = [&](SpeculativePhase phase, std::int32_t batch,
-                                 std::uint32_t frontier, DecodeGraphExecutable* executable) {
+                                 std::uint32_t min_frontier, std::uint32_t max_frontier,
+                                 DecodeGraphExecutable* executable) {
                 if (mtp) {
                     auto state = mtp_context();
                     execution::mtp_decode_batch(state, batch, verify_drafts,
-                                                mtp_envelopes(frontier), executable, phase);
+                                                mtp_envelopes(max_frontier), executable, phase);
                 } else {
                     auto state = dflash_context();
-                    execution::dflash_decode_batch(state, batch, verify_drafts,
-                                                   dflash_envelopes(frontier),
-                                                   target_envelope(frontier), executable, phase);
+                    execution::dflash_decode_batch(
+                        state, batch, verify_drafts, dflash_envelopes(min_frontier, max_frontier),
+                        target_envelope(max_frontier), executable, phase);
                 }
             };
             const auto capture = [&](SpeculativePhase phase, DecodeGraphProfile& profile) {
-                const auto batch    = static_cast<std::int32_t>(profile.batch_size);
-                const auto frontier = profile.max_execution_frontier;
+                const auto batch = static_cast<std::int32_t>(profile.batch_size);
+                const auto low   = profile.min_execution_frontier;
+                const auto high  = profile.max_execution_frontier;
                 if (mtp) {
                     auto state = mtp_context();
                     execution::capture_mtp_decode_batch(state, batch, verify_drafts,
-                                                        mtp_envelopes(frontier),
-                                                        profile.definition, phase);
+                                                        mtp_envelopes(high), profile.definition,
+                                                        phase);
                 } else {
                     auto state = dflash_context();
                     execution::capture_dflash_decode_batch(
-                        state, batch, verify_drafts, dflash_envelopes(frontier),
-                        target_envelope(frontier), profile.definition, phase);
+                        state, batch, verify_drafts, dflash_envelopes(low, high),
+                        target_envelope(high), profile.definition, phase);
                 }
             };
 
             const auto code_warm = forward_profiles.front();
             prepare(code_warm.min, 1);
             device.synchronize();
-            run(SpeculativePhase::Forward, 1, code_warm.max, nullptr);
-            run(SpeculativePhase::Finish, 1, code_warm.max, nullptr);
+            run(SpeculativePhase::Forward, 1, code_warm.min, code_warm.max, nullptr);
+            run(SpeculativePhase::Finish, 1, code_warm.min, code_warm.max, nullptr);
             device.synchronize();
 
             for (const auto phase : {SpeculativePhase::Forward, SpeculativePhase::Finish}) {
