@@ -264,6 +264,14 @@ On the unconstrained route, string parameters preserve function/tool-call marker
 so an unmatched nested parameter opener or a standalone `</parameter>` cannot be represented
 unambiguously; either causes the complete tool-call region to fall back to ordinary content.
 
+By default the unconstrained parser keeps that all-or-nothing behaviour. With
+`--tolerant-tool-calls` the server recovers a call instead when the model adds a suffix after a
+complete call, a second call is malformed, a single final call is cut by the output budget before
+its closing tags, or the closing bracket after the function name is missing: the recovered call is
+reported structurally with a `truncated_tail` diagnostic (logged at Info severity) rather than
+demoted to text, and an undeclared tool name stays structured for the consumer to judge. Constrained
+tool output (below) is well formed by construction and does not use this recovery.
+
 ### Tool constraints
 
 The three protocols share one constrained tool implementation:
@@ -957,6 +965,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--host-context-mib N` | shared pinned Host budget for StateImages, KV and pause snapshots, including in-flight destinations | `8192 MiB + 8 native StateImages` |
 | `--no-thinking` | disable thinking by default | thinking on |
 | `--preserve-thinking` | preserve closed-turn assistant reasoning by default | off |
+| `--tolerant-tool-calls` | recover complete tool calls cut by a malformed wrapper, a trailing suffix or the output budget instead of demoting them to text | off |
 | `--cors` | permissive browser CORS headers | off |
 | `--temperature F` | process-level temperature override | unset |
 | `--top-p F` | process-level top-p override | unset |
