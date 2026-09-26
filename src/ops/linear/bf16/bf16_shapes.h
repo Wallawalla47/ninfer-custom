@@ -34,4 +34,7 @@ namespace ninfer::ops::detail {
 
 [[nodiscard]] Bf16Launch select_bf16_n2560_k4608(std::int32_t tokens);
 
+// Runtime-shape GEMM fallback for any (n, k) the table above does not specialise.
+[[nodiscard]] Bf16Launch select_bf16_general_launch(std::int32_t tokens);
+
 } // namespace ninfer::ops::detail
