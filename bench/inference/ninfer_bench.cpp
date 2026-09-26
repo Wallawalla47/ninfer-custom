@@ -196,7 +196,8 @@ int main(int argc, char** argv) {
             ninfer::KvCapacityPolicy::explicit_capacity(static_cast<std::uint32_t>(kv_capacity));
         engine_options.prefill_chunk                     = options.prefill_chunk;
         engine_options.kv_cache                          = options.kv_cache;
-        engine_options.context_cache.enabled             = false;
+        engine_options.rope_yarn_factor                  = options.rope_yarn_factor;
+        engine_options.context_cache.enabled           = false;
         engine_options.context_cache.device_state_slots  = 0;
         engine_options.context_cache.host_capacity_bytes = 0;
         engine_options.speculative                       = options.speculative;
@@ -206,6 +207,7 @@ int main(int argc, char** argv) {
         env.artifact_path            = options.artifact_path;
         env.artifact_file_size_bytes = ninfer::bench::file_size_or_zero(options.artifact_path);
         env.max_context              = max_context;
+        env.rope_yarn_factor         = options.rope_yarn_factor;
         env.prefill_chunk            = options.prefill_chunk;
         env.kv_cache                 = options.kv_cache;
         env.speculative              = options.speculative;

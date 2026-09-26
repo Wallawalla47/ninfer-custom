@@ -1,6 +1,7 @@
 #include "ninfer_bench_support.h"
 #include "product/constraint_observation.h"
 #include "product/speculative_options.h"
+#include "product/rope_yarn_options.h"
 
 #include <algorithm>
 #include <array>
@@ -334,6 +335,7 @@ std::string usage_text(std::string_view program) {
         << ")\n"
         << "  --warmup <n>                discarded repetitions (default: " << kDefaultWarmup
         << ")\n"
+        << "  --rope-yarn-factor <F>      startup-fixed YaRN, finite [1,4] (default 1); ceiling only\n"
         << "  --max-ctx <tokens>          override auto-sized context capacity\n"
         << "  --prefill-chunk <tokens>    multiple of " << kPrefillChunkAlignment
         << " (default: " << kDefaultPrefillChunk << ")\n"
@@ -407,6 +409,8 @@ BenchOptions parse_args(int argc, char** argv) {
             options.repetitions = parse_positive(value("--repetitions"), "repetitions");
         } else if (arg == "--warmup") {
             options.warmup = parse_nonnegative(value("--warmup"), "warmup");
+        } else if (arg == "--rope-yarn-factor") {
+            options.rope_yarn_factor = product::parse_rope_yarn_factor(value("--rope-yarn-factor"));
         } else if (arg == "--max-ctx") {
             options.max_context = parse_u32(value("--max-ctx"), "max-ctx");
         } else if (arg == "--prefill-chunk") {
@@ -676,7 +680,8 @@ std::string format_table(const BenchEnvironment& env, const std::vector<TestResu
         << "  corpus:     " << env.corpus_path << " (" << env.corpus_tokens << " tokens)\n"
         << "  config:     max_context=" << env.max_context << " prefill_chunk=" << env.prefill_chunk
         << " concurrency=" << env.concurrency << " constraint=" << constraint_name(env.constraint)
-        << (env.mixed_constraints ? " (mixed)" : "") << " kv_cache=" << kv_cache_name(env.kv_cache)
+        << (env.mixed_constraints ? " (mixed)" : "") << " rope_yarn_factor=" << env.rope_yarn_factor
+        << " kv_cache=" << kv_cache_name(env.kv_cache)
         << " spec=" << product::speculative_backend_name(env.speculative.backend)
         << " draft_tokens=" << env.speculative.draft_tokens
         << " proposal_head=" << proposal_head_name(env.speculative.proposal_head)
@@ -800,6 +805,7 @@ std::string format_json(const BenchEnvironment& env, const std::string& command,
         << "    \"constraint_choices\": " << constraint_choices(env.constraint) << ",\n"
         << "    \"mixed_constraints\": " << (env.mixed_constraints ? "true" : "false") << ",\n"
         << "    \"max_context\": " << env.max_context << ",\n"
+        << "    \"rope_yarn_factor\": " << env.rope_yarn_factor << ",\n"
         << "    \"prefill_chunk\": " << env.prefill_chunk << ",\n"
         << "    \"kv_cache\": \"" << kv_cache_name(env.kv_cache) << "\",\n"
         << "    \"speculative_backend\": \""
@@ -901,7 +907,7 @@ std::string format_csv(const BenchEnvironment& env, const std::vector<TestResult
     std::ostringstream out;
     out << "label,kind,n_prompt,n_gen,architecture,prefill_signature,model_name,artifact_path,max_"
            "context,prefill_chunk,concurrency,constraint_type,constraint_file,constraint_source,"
-           "constraint_choices,mixed_constraints,"
+           "constraint_choices,mixed_constraints,rope_yarn_factor,"
            "speculative_"
            "backend,draft_tokens,"
            "proposal_head,decode_path,kv_cache,kv_payload_bytes,load_host_to_device_bytes,"
@@ -934,7 +940,7 @@ std::string format_csv(const BenchEnvironment& env, const std::vector<TestResult
             << csv_field(env.constraint_file) << ','
             << csv_field(env.constraint ? env.constraint->source : "") << ','
             << csv_field(constraint_choices(env.constraint)) << ','
-            << (env.mixed_constraints ? "true" : "false") << ','
+            << (env.mixed_constraints ? "true" : "false") << ',' << env.rope_yarn_factor << ','
             << product::speculative_backend_name(env.speculative.backend) << ','
             << env.speculative.draft_tokens << ','
             << proposal_head_name(env.speculative.proposal_head) << ','
