@@ -106,7 +106,8 @@ void launch_bf16_a16_mma(const Bf16A16Operands& p, Output output, Epilogue epilo
 
 template <class Schedule, class Output, class Epilogue>
 void launch_bf16_a16_sliced_k_mma(const Bf16A16Operands& p, Output output, Epilogue epilogue,
-                                  cudaStream_t stream) {
+                                  cudaStream_t stream,
+                                  pdl::Dependency dependency = pdl::Dependency::Serialized) {
     validate_bf16_operands<Schedule>(p);
     if ((!bf16_predicated_rows<Schedule> && p.rows % Schedule::kBlockRows) ||
         p.k % (bf16_predicated_k<Schedule> ? 8 : Schedule::kBlockK))
@@ -117,9 +118,10 @@ void launch_bf16_a16_sliced_k_mma(const Bf16A16Operands& p, Output output, Epilo
         const dim3 grid(bf16_predicated_rows<Schedule> ? div_up(p.rows, Schedule::kBlockRows)
                                                        : p.rows / Schedule::kBlockRows,
                         div_up(count, Schedule::kBlockTokens));
-        kernel<<<grid, Schedule::kThreads, bytes, stream>>>(p.x, p.weight, output, epilogue, p.rows,
-                                                            p.k, p.tokens, offset);
-        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(pdl::launch_with(
+            dependency,
+            {grid, dim3(Schedule::kThreads), static_cast<std::size_t>(bytes), stream}, kernel, p.x,
+            p.weight, output, epilogue, p.rows, p.k, p.tokens, offset));
     });
 }
 
