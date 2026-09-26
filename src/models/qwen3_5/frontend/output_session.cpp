@@ -102,6 +102,50 @@ std::size_t longest_suffix_prefix(std::string_view text, std::string_view marker
     return 0;
 }
 
+// The model serializes its reasoning close as "\n</think>\n\n", so only a line break confirms a
+// marker. Prose that quotes the marker ("the </think> tag") continues on the same line.
+constexpr bool is_close_separator(char byte) noexcept { return byte == '\r' || byte == '\n'; }
+
+struct ReasoningCloseScan {
+    std::size_t close = std::string::npos;
+    std::size_t hold  = 0;
+    // Bytes from `close` that belong to the framing rather than to the content.
+    std::size_t framing = kThinkClose.size();
+};
+
+// Generated prose can quote the close marker while discussing the protocol, so a marker counts as
+// the reasoning close only when it is followed by a line break, or by the implicit end of the
+// turn. A marker inside quoted text is followed by a space, punctuation or an escaped newline and
+// stays in the reasoning channel. Markers at the end of the available bytes stay pending until their
+// following byte arrives, which keeps a quoted marker from closing the channel across a token
+// round. A constrained output's grammar admits only the exact canonical close framing, which then
+// closes wherever it appears, never implicitly at the end of the turn.
+ReasoningCloseScan scan_reasoning_close(std::string_view text, bool exact_framing,
+                                        bool implicit_end) {
+    if (exact_framing) {
+        constexpr std::string_view framing = fi::kCanonicalReasoningCloseSerialization;
+        const std::size_t marker            = text.find(framing);
+        if (marker != std::string_view::npos) {
+            return ReasoningCloseScan{.close = marker, .framing = framing.size()};
+        }
+        return ReasoningCloseScan{.hold    = longest_suffix_prefix(text, framing, true),
+                                  .framing = framing.size()};
+    }
+    std::size_t search = 0;
+    for (;;) {
+        const std::size_t marker = text.find(kThinkClose, search);
+        if (marker == std::string_view::npos) { break; }
+        const std::size_t after = marker + kThinkClose.size();
+        if (after == text.size()) {
+            if (implicit_end) { return ReasoningCloseScan{.close = marker}; }
+            return ReasoningCloseScan{.hold = text.size() - marker};
+        }
+        if (is_close_separator(text[after])) { return ReasoningCloseScan{.close = marker}; }
+        search = after;
+    }
+    return ReasoningCloseScan{.hold = longest_suffix_prefix(text, kThinkClose, true)};
+}
+
 template <std::size_t Size>
 consteval std::array<std::size_t, Size> make_prefix_failure_table(std::string_view pattern) {
     std::array<std::size_t, Size> failure{};
@@ -166,16 +210,15 @@ struct SemanticThinkingState {
 void feed_semantic_thinking(SemanticThinkingState& state, std::string_view bytes) {
     if (!state.in_reasoning || bytes.empty()) { return; }
     state.close_pending.append(bytes);
-    const std::string_view close =
-        state.exact_reasoning_framing ? fi::kCanonicalReasoningCloseSerialization : kThinkClose;
-    if (state.close_pending.find(close) != std::string::npos) {
+    const ReasoningCloseScan scan =
+        scan_reasoning_close(state.close_pending, state.exact_reasoning_framing, false);
+    if (scan.close != std::string::npos) {
         state.close_pending.clear();
         state.in_reasoning    = false;
         state.control_pending = false;
         return;
     }
-    const std::size_t hold = longest_suffix_prefix(state.close_pending, close, true);
-    state.close_pending.erase(0, state.close_pending.size() - hold);
+    state.close_pending.erase(0, state.close_pending.size() - scan.hold);
 }
 
 struct StopMatch {
@@ -270,15 +313,14 @@ void feed_decoded_text(DecoderState& state, std::string_view text, const StopPol
     }
 
     state.think_marker_pending.append(text);
-    const std::string_view close =
-        state.exact_reasoning_framing ? fi::kCanonicalReasoningCloseSerialization : kThinkClose;
-    const std::size_t marker = state.think_marker_pending.find(close);
-    if (marker != std::string::npos) {
+    const ReasoningCloseScan scan =
+        scan_reasoning_close(state.think_marker_pending, state.exact_reasoning_framing, false);
+    if (scan.close != std::string::npos) {
         feed_channel(state, OutputChannel::Reasoning,
-                     std::string_view(state.think_marker_pending).substr(0, marker), policy,
+                     std::string_view(state.think_marker_pending).substr(0, scan.close), policy,
                      emitted, committed_tokens, best_match);
         close_channel(state, OutputChannel::Reasoning, emitted);
-        std::string content = state.think_marker_pending.substr(marker + close.size());
+        std::string content = state.think_marker_pending.substr(scan.close + scan.framing);
         state.think_marker_pending.clear();
         state.in_reasoning          = false;
         state.strip_content_leading = !state.exact_reasoning_framing;
@@ -286,8 +328,7 @@ void feed_decoded_text(DecoderState& state, std::string_view text, const StopPol
         return;
     }
 
-    const std::size_t hold = longest_suffix_prefix(state.think_marker_pending, close, true);
-    const std::size_t safe = state.think_marker_pending.size() - hold;
+    const std::size_t safe = state.think_marker_pending.size() - scan.hold;
     feed_channel(state, OutputChannel::Reasoning,
                  std::string_view(state.think_marker_pending).substr(0, safe), policy, emitted,
                  committed_tokens, best_match);
@@ -312,13 +353,27 @@ void terminalize(DecoderState& state, const StopPolicy& policy, PublishedOutput&
         feed_decoded_text(state, kUtf8Replacement, policy, emitted, committed_tokens, nullptr);
     }
     if (state.in_reasoning) {
-        feed_channel(state, OutputChannel::Reasoning, state.think_marker_pending, policy, emitted,
+        // A close marker still pending at the end of the turn is the model's implicit close.
+        const ReasoningCloseScan scan =
+            scan_reasoning_close(state.think_marker_pending, state.exact_reasoning_framing, true);
+        const std::size_t split =
+            scan.close != std::string::npos ? scan.close : state.think_marker_pending.size();
+        feed_channel(state, OutputChannel::Reasoning,
+                     std::string_view(state.think_marker_pending).substr(0, split), policy, emitted,
                      committed_tokens, nullptr);
-        state.think_marker_pending.clear();
         close_channel(state, OutputChannel::Reasoning, emitted);
-    } else {
-        close_channel(state, OutputChannel::Content, emitted);
+        if (scan.close != std::string::npos) {
+            std::string content =
+                state.think_marker_pending.substr(scan.close + scan.framing);
+            state.think_marker_pending.clear();
+            state.in_reasoning          = false;
+            state.strip_content_leading = !state.exact_reasoning_framing;
+            feed_content(state, std::move(content), policy, emitted, committed_tokens, nullptr);
+        } else {
+            state.think_marker_pending.clear();
+        }
     }
+    close_channel(state, OutputChannel::Content, emitted);
     state.stop_pending = {};
     state.terminal     = true;
 }
