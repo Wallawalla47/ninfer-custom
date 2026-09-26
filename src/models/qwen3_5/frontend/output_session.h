@@ -82,7 +82,7 @@ public:
     void observe_constraint(bool timings, double prepare_seconds) noexcept;
     void constraint_uploaded(std::size_t bytes) noexcept;
     [[nodiscard]] std::optional<ConstraintObservation> constraint_observation() const;
-    [[nodiscard]] std::uint32_t grammar_masks(std::span<const TokenId> drafts,
+    [[nodiscard]] std::uint64_t grammar_masks(std::span<const TokenId> drafts,
                                               std::span<std::uint32_t> words);
     [[nodiscard]] std::vector<GeneratedToolCall> take_tool_calls() noexcept;
     [[nodiscard]] ToolCallParseDiagnostics tool_call_parse_diagnostics() const noexcept;

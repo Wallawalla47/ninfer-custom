@@ -1662,7 +1662,7 @@ public:
 
             bool constrained(std::size_t row) const noexcept override { return row == 0; }
 
-            std::uint32_t fill(std::size_t, std::span<const TokenId> drafts,
+            std::uint64_t fill(std::size_t, std::span<const TokenId> drafts,
                                std::span<std::uint32_t> words) override {
                 std::fill(words.begin(), words.end(), 0);
                 const auto stride = words.size() / (drafts.size() + 1);

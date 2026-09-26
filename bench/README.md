@@ -125,7 +125,16 @@ time. Per-request phase rates remain separate from this aggregate throughput.
 The benchmark disables context retention because every repetition is an independent root request.
 Schema v16 records `speculative_backend`, `draft_tokens`, and the proposal head independently;
 JSON and CSV identify DFlash2 explicitly. MTP alone reserves its extra lookahead KV margin.
-Schema v20 adds `rope_yarn_factor` to `config`.
+Schema v20 adds `rope_yarn_factor`, `ngram_draft_tokens` and `ngram_min_match` to `config`.
+
+`--ngram-draft-tokens 1..63 --ngram-min-match 4..64` enables the single-request
+[ngram copy proposer](../docs/ngram.md) alongside the selected neural backend.
+It defaults to off. Reports separate ngram rounds, drafted tokens and accepted
+tokens from aggregate speculative counters; JSON includes per-repetition values.
+A one-token `tg` seed is not a file-copy benchmark. Use a suitable repeated-token
+corpus with `-pg`, verify the output separately, and require positive ngram
+acceptance before attributing a speed change to copying. The standard matrix
+remains neural-only unless its cases explicitly request ngram.
 
 ## Context-cost calibration
 
@@ -1174,7 +1183,8 @@ statistics. JSON schema version 20 records the public value objects directly:
 preparation/mask/matcher seconds, evaluated positions and mask upload bytes; `null` without a constraint;
 - `constraint_draft_wait_exposed_seconds`: the sample's exposure to draft-ready wait; shared batch
 exposure must not be summed across requests, and CPU constraint work must not be added to wall time;
-- each request sample's `speculative`: window, rounds, drafted/accepted tokens, fallbacks, and per-position
+- each request sample's `speculative`: window, rounds, drafted/accepted tokens, fallbacks, separate
+  ngram rounds/drafted/accepted tokens, and per-position
 acceptance.
 
 Each test reports `workspace_peak_bytes` from the planned phase markers, including CUDA Graph

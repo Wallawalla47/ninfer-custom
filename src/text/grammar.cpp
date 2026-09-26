@@ -315,16 +315,16 @@ GrammarSession& GrammarSession::operator=(GrammarSession&&) noexcept = default;
 
 std::size_t GrammarSession::mask_words() const noexcept { return impl_->words; }
 
-std::uint32_t GrammarSession::masks(std::span<const std::int32_t> drafts,
+std::uint64_t GrammarSession::masks(std::span<const std::int32_t> drafts,
                                     std::span<std::uint32_t> words) {
-    if (drafts.size() >= 32 || impl_->tentative ||
+    if (drafts.size() >= 64 || impl_->tentative ||
         words.size() != (drafts.size() + 1) * impl_->words) {
         throw std::logic_error("invalid grammar lookahead transaction");
     }
     WorkTimer timer(impl_->observed.timings_collected, impl_->observed.mask_seconds);
     int advanced       = 0;
     bool reachable     = true;
-    std::uint32_t dead = 0;
+    std::uint64_t dead = 0;
     try {
         for (std::size_t position = 0; position <= drafts.size(); ++position) {
             auto mask = words.subspan(position * impl_->words, impl_->words);
@@ -332,7 +332,7 @@ std::uint32_t GrammarSession::masks(std::span<const std::int32_t> drafts,
                 impl_->fill(mask);
                 ++impl_->observed.mask_positions;
                 if (std::all_of(mask.begin(), mask.end(), [](auto word) { return word == 0; })) {
-                    dead |= 1u << position;
+                    dead |= std::uint64_t{1} << position;
                     reachable = false;
                     mask[0]   = 1;
                 }

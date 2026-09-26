@@ -19,6 +19,7 @@
 #include "models/qwen3_5/execution/text.h"
 #include "models/qwen3_5/execution/vision.h"
 #include "models/qwen3_5/program/vision_prefill.h"
+#include "models/qwen3_5/program/ngram_proposer.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -187,7 +188,13 @@ struct CaptureReservation {
 };
 
 struct RequestControl {
-    Lifecycle lifecycle = Lifecycle::Empty;
+    std::unique_ptr<NgramProposer> ngram;
+    std::shared_ptr<const NgramSnapshot> ngram_snapshot;
+    std::uint64_t ngram_copy_source = 0;
+    std::uint32_t ngram_copy_offset = 0;
+    std::size_t ngram_copy_ledger   = 0;
+    std::size_t ngram_indexed       = 0;
+    Lifecycle lifecycle             = Lifecycle::Empty;
     PendingCandidate pending;
     ops::SamplingConfig sampling_host;
     GenerationTimings timings;
@@ -343,6 +350,9 @@ public:
     const ContextCacheOptions context_cache;
     const std::uint32_t prefill_chunk;
     const std::uint32_t draft_window;
+    const std::uint32_t neural_draft_window;
+    const std::uint32_t ngram_draft_window;
+    const std::uint32_t ngram_min_match;
     const SpeculativeBackend speculative_backend;
     const KvCacheStorage kv_storage;
     const ProposalHead proposal_head;
@@ -379,7 +389,7 @@ public:
     Tensor grammar_masks_device;
     std::optional<PinnedHostBuffer> grammar_masks_host;
     std::optional<DFlashDraftHandoff> dflash_draft_handoff;
-    std::array<std::uint32_t, kMaximumConcurrency> grammar_dead_positions{};
+    std::array<std::uint64_t, kMaximumConcurrency> grammar_dead_positions{};
     ops::SamplingMask bind_grammar_mask(runtime::TokenMaskProvider*, std::size_t row);
     ops::SamplingMask fill_grammar_mask(runtime::TokenMaskProvider*, std::size_t row,
                                         std::span<const TokenId> drafts);
@@ -490,6 +500,9 @@ public:
     DecodeGraphFamily ordinary_graphs;
     DecodeGraphFamily speculative_forward_graphs;
     DecodeGraphFamily speculative_finish_graphs;
+    // Ngram rounds verify their own width through a second Forward/Finish pair.
+    DecodeGraphFamily ngram_forward_graphs;
+    DecodeGraphFamily ngram_finish_graphs;
 
     [[nodiscard]] std::uint32_t initial_mtp_extent(const RequestBasePlanImpl&) const;
     [[nodiscard]] UnitDemand prefill_unit(std::uint32_t prompt, std::uint32_t cursor,
@@ -589,6 +602,8 @@ public:
                                        std::span<const std::uint32_t> counts);
     void validate_licensed_tokens(std::span<const TokenId> tokens) const;
     void mark_workspace_usage(std::size_t phase_bytes) noexcept;
+    [[nodiscard]] NgramProposer::Match propose_ngram(std::span<const std::uint32_t> lanes,
+                                                     std::span<const runtime::RoundBudget> budgets);
     [[nodiscard]] runtime::BatchedGeneratedRound decode_ordinary_batch(
         std::span<const std::uint32_t> lanes, std::span<const runtime::RoundBudget> budgets,
         runtime::ExecutionTiming* failed_timing, runtime::TokenMaskProvider* masks);

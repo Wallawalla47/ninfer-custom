@@ -213,7 +213,7 @@ RequestBasePlan ProgramImpl::plan_request(PreparedPromptData&& prompt,
 std::uint32_t ProgramImpl::initial_mtp_extent(const RequestBasePlanImpl& base) const {
     const auto prompt = base.summary.prompt_tokens;
     return speculative_backend == SpeculativeBackend::Mtp
-               ? std::min({draft_window,
+               ? std::min({neural_draft_window,
                            base.summary.effective_output_tokens > 1
                                ? base.summary.effective_output_tokens - 2U
                                : 0U,

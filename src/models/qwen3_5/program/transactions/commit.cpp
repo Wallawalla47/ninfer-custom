@@ -43,8 +43,11 @@ PendingBatch ProgramImpl::wrap_pending(std::span<const std::uint32_t> lanes,
         round.tokens, round.row_counts, round.row_stride, round.timing);
     for (std::size_t row = 0; row < lanes.size(); ++row) {
         const auto count = round.row_counts.empty() ? 1 : round.row_counts[row];
+        // A row verifies at most 64 positions: 63 drafts and the bonus.
+        const std::uint64_t reached =
+            count >= 64 ? ~std::uint64_t{0} : (std::uint64_t{1} << count) - 1U;
         ContractAccess::constraint_failed(pending, row,
-                                          (grammar_dead_positions[row] & ((1u << count) - 1)) != 0);
+                                          (grammar_dead_positions[row] & reached) != 0);
     }
     return pending;
 }

@@ -520,7 +520,7 @@ std::optional<ConstraintObservation> OutputSession::constraint_observation() con
     return result;
 }
 
-std::uint32_t OutputSession::grammar_masks(std::span<const TokenId> drafts,
+std::uint64_t OutputSession::grammar_masks(std::span<const TokenId> drafts,
                                            std::span<std::uint32_t> words) {
     if (!constrained()) { throw std::logic_error("mask requested for unconstrained output"); }
     return impl_->grammar->masks(drafts, words);

@@ -200,7 +200,9 @@ void ProgramImpl::prepare_graphs() {
             }
             cache.page_pool().zero_pages(pages, device.stream);
         };
-    const auto prepare_representative = [&](std::uint32_t frontier, std::uint32_t batch_size) {
+    const auto prepare_representative = [&](std::uint32_t frontier, std::uint32_t batch_size,
+                                            std::uint32_t capture_drafts,
+                                            std::uint32_t capture_proposal_drafts) {
         if (batch_size == 0 || batch_size > max_concurrency) {
             throw std::logic_error("CUDA Graph representative batch is invalid");
         }
@@ -231,17 +233,26 @@ void ProgramImpl::prepare_graphs() {
                            checked_i32(frontier, "graph representative MTP position"));
         }
         if (io.dflash_decode) {
-            *dflash_host_ingress       = {};
-            *dflash_host_egress        = {};
-            const std::uint32_t extent = std::min(draft_window, capacity - frontier - 1U);
-            const std::uint32_t width  = draft_window + 1U;
+            *dflash_host_ingress = {};
+            *dflash_host_egress  = {};
+            const std::uint32_t extent =
+                std::min(capture_proposal_drafts, capacity - frontier - 1U);
+            const std::uint32_t width = capture_drafts + 1U;
+            for (std::uint32_t step = 0; step < capture_drafts; ++step) {
+                dflash_host_ingress->ngram_q[step * ops::kSparseSpeculativeCandidates] = 1.0F;
+                for (std::uint32_t slot = 0; slot < ops::kSparseSpeculativeCandidates; ++slot) {
+                    dflash_host_ingress
+                        ->ngram_candidates[step * ops::kSparseSpeculativeCandidates + slot] = slot;
+                }
+            }
             for (std::uint32_t row = 0; row < batch_size; ++row) {
                 dflash_host_ingress->anchors[row] = 0;
                 dflash_host_ingress->execution_frontiers[row] =
                     checked_i32(frontier, "graph representative DFlash frontier");
                 dflash_host_ingress->context_frontiers[row] =
                     checked_i32(frontier, "graph representative DFlash context frontier");
-                dflash_host_ingress->proposal_valid_columns[row] = static_cast<std::int32_t>(width);
+                dflash_host_ingress->proposal_valid_columns[row] =
+                    static_cast<std::int32_t>(capture_proposal_drafts + 1U);
                 dflash_host_ingress->proposal_extents[row] = static_cast<std::int32_t>(extent);
                 dflash_host_ingress->target_valid_columns[row] =
                     static_cast<std::int32_t>(extent + 1U);
@@ -261,8 +272,8 @@ void ProgramImpl::prepare_graphs() {
         if (io.mtp_decode) {
             *mtp_host_ingress          = {};
             *mtp_host_egress           = {};
-            const std::uint32_t extent = std::min(draft_window, capacity - frontier - 1U);
-            const std::uint32_t width  = draft_window + 1U;
+            const std::uint32_t extent = std::min(capture_drafts, capacity - frontier - 1U);
+            const std::uint32_t width  = capture_drafts + 1U;
             for (std::uint32_t row = 0; row < batch_size; ++row) {
                 mtp_host_ingress->anchors[row] = 0;
                 mtp_host_ingress->base_frontiers[row] =
@@ -272,8 +283,8 @@ void ProgramImpl::prepare_graphs() {
                 mtp_host_ingress->current_extents[row] = static_cast<std::int32_t>(extent);
                 mtp_host_ingress->target_valid_columns[row] =
                     static_cast<std::int32_t>(extent + 1U);
-                for (std::uint32_t step = 0; step < draft_window; ++step) {
-                    mtp_host_ingress->current_drafts[row * draft_window + step] = 0;
+                for (std::uint32_t step = 0; step < capture_drafts; ++step) {
+                    mtp_host_ingress->current_drafts[row * capture_drafts + step] = 0;
                 }
                 for (std::uint32_t column = 0; column < width; ++column) {
                     mtp_host_ingress->target_rope_positions[row * width + column] =
@@ -304,6 +315,9 @@ void ProgramImpl::prepare_graphs() {
             }
         }
     };
+    const auto prepare_ordinary = [&](std::uint32_t frontier, std::uint32_t batch_size) {
+        prepare_representative(frontier, batch_size, 0, 0);
+    };
     const auto execution_core = [&] {
         return execution::ExecutionCore{device,
                                         parameters,
@@ -325,7 +339,7 @@ void ProgramImpl::prepare_graphs() {
             *io.ordinary,          *ordinary_host_ingress,
             *ordinary_host_egress, state_images->continuation_hidden_store()};
         const GraphExecutionProfile code_warm = ordinary_profiles.front();
-        prepare_representative(code_warm.min, 1);
+        prepare_ordinary(code_warm.min, 1);
         device.synchronize();
         execution::ordinary_decode_batch(ordinary_state, 1, {code_warm.min + 1, code_warm.max + 1},
                                          nullptr);
@@ -354,7 +368,7 @@ void ProgramImpl::prepare_graphs() {
         instantiate_graph_family(ordinary_graphs, "ordinary", device);
         for (auto& topology : ordinary_graphs.topologies) {
             const auto& profile = ordinary_graphs.profiles[*topology.installed_profile];
-            prepare_representative(profile.min_execution_frontier, profile.batch_size);
+            prepare_ordinary(profile.min_execution_frontier, profile.batch_size);
             device.synchronize();
             topology.executable.launch(device.stream);
             device.synchronize();
@@ -363,109 +377,126 @@ void ProgramImpl::prepare_graphs() {
     if (speculative_backend != SpeculativeBackend::None) {
         using execution::SpeculativePhase;
         const bool mtp = speculative_backend == SpeculativeBackend::Mtp;
-        const auto forward_profiles =
-            mtp ? mtp_graph_profiles(capacity, draft_window)
-                : dflash_graph_profiles(speculative_backend, capacity, draft_window);
-        // DFlash acceptance has no context-dependent nodes or resource envelope.
-        const auto finish_profiles =
-            mtp ? forward_profiles : std::vector<GraphExecutionProfile>{{0, capacity - 1}};
-        validate_graph_profiles(forward_profiles, capacity - 1, "speculative forward");
-        validate_graph_profiles(finish_profiles, capacity - 1, "speculative finish");
-        const auto mtp_context = [&] {
-            return execution::MtpBatchContext{execution_core(),
-                                              decoder->text_kv,
-                                              *decoder->mtp_cache(),
-                                              *io.mtp_decode,
-                                              *mtp_host_ingress,
-                                              *mtp_host_egress,
-                                              state_images->continuation_hidden_store()};
-        };
-        const auto dflash_context = [&] {
-            return execution::DFlashBatchContext{execution_core(),
+        for (const bool ngram : {false, true}) {
+            if (ngram && ngram_draft_window == 0) { continue; }
+            const std::uint32_t verify_drafts = ngram ? ngram_draft_window : neural_draft_window;
+            const auto prepare = [&, verify_drafts](std::uint32_t frontier, std::uint32_t batch) {
+                prepare_representative(frontier, batch, verify_drafts, verify_drafts);
+            };
+            auto& forward_family = ngram ? ngram_forward_graphs : speculative_forward_graphs;
+            auto& finish_family  = ngram ? ngram_finish_graphs : speculative_finish_graphs;
+            const auto forward_profiles =
+                mtp ? mtp_graph_profiles(capacity, verify_drafts, neural_draft_window)
+                    : dflash_graph_profiles(speculative_backend, capacity, verify_drafts);
+            // DFlash acceptance has no context-dependent nodes or resource envelope.
+            const auto finish_profiles =
+                mtp ? forward_profiles : std::vector<GraphExecutionProfile>{{0, capacity - 1}};
+            validate_graph_profiles(forward_profiles, capacity - 1, "speculative forward");
+            validate_graph_profiles(finish_profiles, capacity - 1, "speculative finish");
+            const auto mtp_context = [&] {
+                execution::MtpBatchContext state{execution_core(),
                                                  decoder->text_kv,
-                                                 *dflash,
-                                                 *io.dflash_decode,
-                                                 *dflash_host_ingress,
-                                                 *dflash_host_egress,
-                                                 state_images->continuation_hidden_store(),
-                                                 dflash_draft_handoff->tokens(),
-                                                 dflash_draft_handoff->ready};
-        };
-        const auto target_envelope = [&](std::uint32_t frontier) {
-            return ops::CausalAttentionExecutionEnvelope{
-                1, static_cast<std::uint32_t>(std::min<std::uint64_t>(
-                       capacity, static_cast<std::uint64_t>(frontier) + draft_window + 1ULL))};
-        };
-        const auto run = [&](SpeculativePhase phase, std::int32_t batch, std::uint32_t frontier,
-                             DecodeGraphExecutable* executable) {
-            if (mtp) {
-                auto state = mtp_context();
-                execution::mtp_decode_batch(
-                    state, batch, draft_window,
-                    mtp_causal_attention_envelopes(frontier, draft_window, capacity), executable,
-                    phase);
-            } else {
-                auto state = dflash_context();
-                execution::dflash_decode_batch(state, batch, draft_window,
-                                               dflash_envelopes(frontier, draft_window),
-                                               target_envelope(frontier), executable, phase);
-            }
-        };
-        const auto capture = [&](SpeculativePhase phase, DecodeGraphProfile& profile) {
-            const auto batch    = static_cast<std::int32_t>(profile.batch_size);
-            const auto frontier = profile.max_execution_frontier;
-            if (mtp) {
-                auto state = mtp_context();
-                execution::capture_mtp_decode_batch(
-                    state, batch, draft_window,
-                    mtp_causal_attention_envelopes(frontier, draft_window, capacity),
-                    profile.definition, phase);
-            } else {
-                auto state = dflash_context();
-                execution::capture_dflash_decode_batch(
-                    state, batch, draft_window, dflash_envelopes(frontier, draft_window),
-                    target_envelope(frontier), profile.definition, phase);
-            }
-        };
-
-        const auto code_warm = forward_profiles.front();
-        prepare_representative(code_warm.min, 1);
-        device.synchronize();
-        run(SpeculativePhase::Forward, 1, code_warm.max, nullptr);
-        run(SpeculativePhase::Finish, 1, code_warm.max, nullptr);
-        device.synchronize();
-
-        for (const auto phase : {SpeculativePhase::Forward, SpeculativePhase::Finish}) {
-            const bool forward = phase == SpeculativePhase::Forward;
-            auto& family       = forward ? speculative_forward_graphs : speculative_finish_graphs;
-            const auto& planned_profiles = forward ? forward_profiles : finish_profiles;
-            family.profiles.reserve(planned_profiles.size() * max_concurrency);
-            for (std::uint32_t batch = 1; batch <= max_concurrency; ++batch) {
-                for (const auto planned : planned_profiles) {
-                    family.profiles.emplace_back();
-                    auto& profile                  = family.profiles.back();
-                    profile.batch_size             = batch;
-                    profile.min_execution_frontier = planned.min;
-                    profile.max_execution_frontier = planned.max;
-                    profile.topology_class = planned.topology_class * max_concurrency + batch - 1U;
-                    capture(phase, profile);
+                                                 *decoder->mtp_cache(),
+                                                 *io.mtp_decode,
+                                                 *mtp_host_ingress,
+                                                 *mtp_host_egress,
+                                                 state_images->continuation_hidden_store()};
+                state.neural_proposal_drafts = neural_draft_window;
+                return state;
+            };
+            const auto dflash_context = [&] {
+                execution::DFlashBatchContext state{execution_core(),
+                                                    decoder->text_kv,
+                                                    *dflash,
+                                                    *io.dflash_decode,
+                                                    *dflash_host_ingress,
+                                                    *dflash_host_egress,
+                                                    state_images->continuation_hidden_store(),
+                                                    dflash_draft_handoff->tokens(),
+                                                    dflash_draft_handoff->ready};
+                state.ngram                  = ngram;
+                state.neural_proposal_drafts = neural_draft_window;
+                return state;
+            };
+            const auto target_envelope = [&](std::uint32_t frontier) {
+                return ops::CausalAttentionExecutionEnvelope{
+                    1, static_cast<std::uint32_t>(std::min<std::uint64_t>(
+                           capacity, static_cast<std::uint64_t>(frontier) + verify_drafts + 1ULL))};
+            };
+            const auto mtp_envelopes = [&](std::uint32_t frontier) {
+                return mtp_causal_attention_envelopes(frontier, verify_drafts, capacity,
+                                                      neural_draft_window);
+            };
+            const auto run = [&](SpeculativePhase phase, std::int32_t batch,
+                                 std::uint32_t frontier, DecodeGraphExecutable* executable) {
+                if (mtp) {
+                    auto state = mtp_context();
+                    execution::mtp_decode_batch(state, batch, verify_drafts,
+                                                mtp_envelopes(frontier), executable, phase);
+                } else {
+                    auto state = dflash_context();
+                    execution::dflash_decode_batch(state, batch, verify_drafts,
+                                                   dflash_envelopes(frontier),
+                                                   target_envelope(frontier), executable, phase);
                 }
-            }
-            instantiate_graph_family(family, forward ? "speculative forward" : "speculative finish",
-                                     device);
-        }
+            };
+            const auto capture = [&](SpeculativePhase phase, DecodeGraphProfile& profile) {
+                const auto batch    = static_cast<std::int32_t>(profile.batch_size);
+                const auto frontier = profile.max_execution_frontier;
+                if (mtp) {
+                    auto state = mtp_context();
+                    execution::capture_mtp_decode_batch(state, batch, verify_drafts,
+                                                        mtp_envelopes(frontier),
+                                                        profile.definition, phase);
+                } else {
+                    auto state = dflash_context();
+                    execution::capture_dflash_decode_batch(
+                        state, batch, verify_drafts, dflash_envelopes(frontier),
+                        target_envelope(frontier), profile.definition, phase);
+                }
+            };
 
-        // Warm complete transactions: finish consumes persistent outputs of its paired forward.
-        for (auto& topology : speculative_forward_graphs.topologies) {
-            auto& forward     = speculative_forward_graphs.profiles[*topology.installed_profile];
-            auto& finish      = speculative_finish_graphs.select(forward.batch_size,
-                                                                 forward.min_execution_frontier);
-            auto& finish_exec = speculative_finish_graphs.install(finish);
-            prepare_representative(forward.min_execution_frontier, forward.batch_size);
+            const auto code_warm = forward_profiles.front();
+            prepare(code_warm.min, 1);
             device.synchronize();
-            topology.executable.launch(device.stream);
-            finish_exec.launch(device.stream);
+            run(SpeculativePhase::Forward, 1, code_warm.max, nullptr);
+            run(SpeculativePhase::Finish, 1, code_warm.max, nullptr);
             device.synchronize();
+
+            for (const auto phase : {SpeculativePhase::Forward, SpeculativePhase::Finish}) {
+                const bool forward           = phase == SpeculativePhase::Forward;
+                auto& family                 = forward ? forward_family : finish_family;
+                const auto& planned_profiles = forward ? forward_profiles : finish_profiles;
+                family.profiles.reserve(planned_profiles.size() * max_concurrency);
+                for (std::uint32_t batch = 1; batch <= max_concurrency; ++batch) {
+                    for (const auto planned : planned_profiles) {
+                        family.profiles.emplace_back();
+                        auto& profile                  = family.profiles.back();
+                        profile.batch_size             = batch;
+                        profile.min_execution_frontier = planned.min;
+                        profile.max_execution_frontier = planned.max;
+                        profile.topology_class =
+                            planned.topology_class * max_concurrency + batch - 1U;
+                        capture(phase, profile);
+                    }
+                }
+                const char* label = forward ? (ngram ? "ngram forward" : "speculative forward")
+                                            : (ngram ? "ngram finish" : "speculative finish");
+                instantiate_graph_family(family, label, device);
+            }
+
+            // Warm complete transactions: finish consumes persistent outputs of its paired forward.
+            for (auto& topology : forward_family.topologies) {
+                auto& forward = forward_family.profiles[*topology.installed_profile];
+                auto& finish =
+                    finish_family.select(forward.batch_size, forward.min_execution_frontier);
+                auto& finish_exec = finish_family.install(finish);
+                prepare(forward.min_execution_frontier, forward.batch_size);
+                device.synchronize();
+                topology.executable.launch(device.stream);
+                finish_exec.launch(device.stream);
+                device.synchronize();
+            }
         }
     }
 

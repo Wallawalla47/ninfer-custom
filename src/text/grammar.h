@@ -25,7 +25,8 @@ public:
     ~GrammarSession();
     GrammarSession(GrammarSession&&) noexcept;
     GrammarSession& operator=(GrammarSession&&) noexcept;
-    [[nodiscard]] std::uint32_t masks(std::span<const std::int32_t> drafts,
+    // Returns one dead-end bit per position; at most 63 drafts plus the bonus position.
+    [[nodiscard]] std::uint64_t masks(std::span<const std::int32_t> drafts,
                                       std::span<std::uint32_t> words);
     void accept(std::int32_t token);
     void accept(std::span<const std::int32_t> tokens);
