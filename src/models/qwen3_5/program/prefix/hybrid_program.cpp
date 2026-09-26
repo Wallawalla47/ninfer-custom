@@ -979,24 +979,9 @@ StartResult ProgramImpl::hybrid_activate(HybridMaterializationTransaction& trans
                 *workspace_plan.vision, request.prefill->prompt, *request.prefill->vision_plan,
                 vision_handoff_peak_bytes);
             if (parameters.model.overlay_vision() && request.prefill->vision_plan->control) {
-                const auto& plan               = *request.prefill->vision_plan;
-                const std::uint32_t suffix_end = plan.control->items.size();
-                std::uint32_t first_needed     = suffix_end;
-                for (const auto& use : plan.uses) {
-                    if (use.end > reuse && use.prepared_item_index < first_needed) {
-                        first_needed = use.prepared_item_index;
-                    }
-                }
-                execution::VisionOverlayWindowStats window_stats;
-                std::vector<execution::PinnedVisionResult> preencoded;
-                if (first_needed < suffix_end) {
-                    preencoded =
-                        execution::encode_items_overlay(device, parameters, request.prefill->prompt,
-                                                        plan, first_needed, &window_stats);
-                } else {
-                    preencoded.resize(suffix_end);
-                }
-                request.prefill->vision->set_preencoded(std::move(preencoded), window_stats);
+                execution::encode_overlay_suffix(device, parameters, request.prefill->prompt,
+                                                 *request.prefill->vision_plan, reuse,
+                                                 *request.prefill->vision);
             }
         }
 
