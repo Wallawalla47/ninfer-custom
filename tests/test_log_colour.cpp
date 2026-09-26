@@ -94,20 +94,20 @@ int main() {
                       "prefill value does not inherit the prefill colour");
 
     // A done line: every clause is coloured by its clause-opening name, and the
-    // legacy key=value overlay tail keeps its own colours.
+    // legacy key=value vision-offload tail keeps its own colours.
     const std::string_view done =
         "req#42 done | openai-chat | stop token | prompt 1,200 | output 350 | cache 900 (75%) | "
         "TTFT 200ms | total 5.0s | prefill 6,000.0 tok/s | decode 45.2 tok/s | "
-        "overlay_window_ms=123.4 overlay_evicted_mib=5";
+        "vision_offload_ms=123.4 vision_offload_evicted_mib=5";
     const std::string done_coloured = colourise_stats_line(done, true);
-    const auto done_prefill = sgr_spec(done_coloured, "prefill");
-    const auto done_prompt  = sgr_spec(done_coloured, "prompt");
-    const auto overlay      = sgr_spec(done_coloured, "overlay_window_ms=123.4");
+    const auto done_prefill         = sgr_spec(done_coloured, "prefill");
+    const auto done_prompt          = sgr_spec(done_coloured, "prompt");
+    const auto offload              = sgr_spec(done_coloured, "vision_offload_ms=123.4");
     failures += check(sgr_spec(done_coloured, "req#42").has_value() == false,
                       "done line header was coloured");
     failures += check(done_prefill.has_value(), "done line prefill statistic is not coloured");
     failures += check(done_prompt.has_value(), "done line prompt statistic is not coloured");
-    failures += check(overlay.has_value(), "legacy key=value tail of a done line is not coloured");
+    failures += check(offload.has_value(), "legacy key=value tail of a done line is not coloured");
 
     // Families own disjoint kPalette blocks, so the same statistic name uses a
     // different colour region on a done line than on a throughput line.

@@ -316,12 +316,13 @@ OperationalRecord render_request_done(const RequestLogContext& context,
             out << ", control " << product::format_pretty_count(outcome.thinking.injected_tokens);
         }
     }
-    if (metrics.overlay_window_seconds > 0.0) {
-        out << " overlay_window_ms=" << metrics.overlay_window_seconds * 1000.0
-            << " overlay_evicted_mib=" << metrics.overlay_evicted_bytes / (1024 * 1024)
-            << " overlay_evict_ms=" << metrics.overlay_evict_seconds * 1000.0
-            << " overlay_restore_ms=" << metrics.overlay_restore_seconds * 1000.0
-            << " overlay_staged_mib=" << metrics.overlay_staged_bytes / (1024 * 1024);
+    if (metrics.vision_offload_window_seconds > 0.0) {
+        out << " vision_offload_ms=" << metrics.vision_offload_window_seconds * 1000.0
+            << " vision_offload_evicted_mib="
+            << metrics.vision_offload_evicted_bytes / (1024 * 1024)
+            << " vision_offload_evict_ms=" << metrics.vision_offload_evict_seconds * 1000.0
+            << " vision_offload_restore_ms=" << metrics.vision_offload_restore_seconds * 1000.0
+            << " vision_offload_staged_mib=" << metrics.vision_offload_staged_bytes / (1024 * 1024);
     }
     return {.severity = OperationalSeverity::Info, .message = out.str()};
 }

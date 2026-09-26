@@ -188,8 +188,7 @@ int main() {
     failures +=
         check(!defaults.preserve_thinking, "thinking history is unexpectedly preserved by default");
     failures += check(!defaults.enable_vision, "Vision is not disabled by default");
-    failures += check(defaults.vision_residency == ninfer::VisionResidency::Resident,
-                      "Vision residency is not resident by default");
+    failures += check(!defaults.vision_offload, "Vision offload is not off by default");
     failures += check(defaults.vision_max_merged_tokens == 32768,
                       "merged Vision token default mismatch");
     failures += check(defaults.request_log_jsonl.empty(),
@@ -306,25 +305,27 @@ int main() {
                           dflash_vision.speculative.draft_tokens == 15,
                       "serve options did not preserve combined DFlash and Vision features");
 
-    const ServeOptions overlay =
-        parse({"ninfer-serve", "model.ninfer", "--vision", "--vision-residency", "overlay",
-               "--vision-max-merged", "512"});
-    failures += check(overlay.enable_vision &&
-                          overlay.vision_residency == ninfer::VisionResidency::Overlay,
-                      "--vision-residency overlay did not reach serving options");
-    failures += check(overlay.vision_max_merged_tokens == 512,
+    const ServeOptions offload = parse({"ninfer-serve", "model.ninfer", "--vision",
+                                        "--vision-offload", "on", "--vision-max-merged", "512"});
+    failures += check(offload.enable_vision && offload.vision_offload,
+                      "--vision-offload on did not reach serving options");
+    failures += check(offload.vision_max_merged_tokens == 512,
                       "--vision-max-merged did not preserve its value");
-    bool overlay_without_vision_rejected = false;
+    failures +=
+        check(!parse({"ninfer-serve", "model.ninfer", "--vision-offload", "off"}).vision_offload,
+              "--vision-offload off did not reach serving options");
+    bool offload_without_vision_rejected = false;
     try {
-        (void)parse({"ninfer-serve", "model.ninfer", "--vision-residency", "overlay"});
-    } catch (const std::invalid_argument&) { overlay_without_vision_rejected = true; }
-    failures += check(overlay_without_vision_rejected,
-                      "--vision-residency overlay without --vision was accepted");
-    bool bad_residency_rejected = false;
+        (void)parse({"ninfer-serve", "model.ninfer", "--vision-offload", "on"});
+    } catch (const std::invalid_argument&) { offload_without_vision_rejected = true; }
+    failures +=
+        check(offload_without_vision_rejected, "--vision-offload on without --vision was accepted");
+    bool bad_offload_rejected = false;
     try {
-        (void)parse({"ninfer-serve", "model.ninfer", "--vision", "--vision-residency", "pinned"});
-    } catch (const std::invalid_argument&) { bad_residency_rejected = true; }
-    failures += check(bad_residency_rejected, "--vision-residency accepted an unknown mode");
+        (void)parse({"ninfer-serve", "model.ninfer", "--vision", "--vision-offload", "overlay"});
+    } catch (const std::invalid_argument&) { bad_offload_rejected = true; }
+    failures +=
+        check(bad_offload_rejected, "--vision-offload accepted a value other than on or off");
     bool low_merged_rejected = false;
     try {
         (void)parse({"ninfer-serve", "model.ninfer", "--vision-max-merged", "33"});

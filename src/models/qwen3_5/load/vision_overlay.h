@@ -41,7 +41,7 @@ struct VisionOverlayLayout {
 };
 
 // Runtime assets the overlay window needs, published on the model when the engine runs
-// with VisionResidency::Overlay. The pool pointer is non-const because the window calls
+// with vision offload on. The pool pointer is non-const because the window calls
 // the pool's evict()/restore() during an overlay encode.
 struct VisionOverlayAssets {
     EvictableWeightPool* pool               = nullptr;

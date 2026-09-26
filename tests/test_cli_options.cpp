@@ -120,22 +120,25 @@ int run_tests() {
                           dflash_vision.speculative.backend == ninfer::SpeculativeBackend::DFlash &&
                           dflash_vision.speculative.draft_tokens == 7,
                       "CLI did not preserve the combined DFlash and Vision startup features");
-    const ninfer::cli::Options overlay =
-        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--vision",
-               "--vision-residency", "overlay", "--vision-max-merged", "512"});
-    failures += check(overlay.enable_vision &&
-                          overlay.vision_residency == ninfer::VisionResidency::Overlay,
-                      "--vision-residency overlay did not reach CLI options");
-    failures += check(overlay.vision_max_merged_tokens == 512,
+    const ninfer::cli::Options offload =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--vision", "--vision-offload",
+               "on", "--vision-max-merged", "512"});
+    failures += check(offload.enable_vision && offload.vision_offload,
+                      "--vision-offload on did not reach CLI options");
+    failures += check(offload.vision_max_merged_tokens == 512,
                       "--vision-max-merged did not preserve its value");
-    failures += check(
-        ninfer::cli::usage_text("ninfer-cli").find("--vision-residency") != std::string::npos,
-        "CLI help omits --vision-residency");
+    failures += check(!parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--vision",
+                              "--vision-offload", "on", "--vision-offload", "off"})
+                           .vision_offload,
+                      "--vision-offload off did not reach CLI options");
+    failures +=
+        check(ninfer::cli::usage_text("ninfer-cli").find("--vision-offload") != std::string::npos,
+              "CLI help omits --vision-offload");
     failures += check(rejects([] {
                           (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
-                                       "--vision-residency", "pinned"});
+                                       "--vision-offload", "overlay"});
                       }),
-                      "--vision-residency accepted an unknown mode");
+                      "--vision-offload accepted a value other than on or off");
     failures += check(rejects([] {
                           (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
                                        "--vision-max-merged", "33"});

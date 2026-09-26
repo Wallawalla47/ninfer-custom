@@ -22,19 +22,19 @@ struct RequestLifetime;
 struct RequestCapacity;
 
 struct GenerationMetrics {
-    double prepare_seconds         = 0.0;
-    double ttft_seconds            = 0.0;
-    double vision_seconds          = 0.0;
-    double prefill_seconds         = 0.0;
-    double decode_seconds          = 0.0;
-    double prompt_wall_seconds     = 0.0;
-    double generation_wall_seconds = 0.0;
-    double total_seconds           = 0.0;
-    double overlay_window_seconds   = 0.0;
-    double overlay_evict_seconds    = 0.0;
-    double overlay_restore_seconds  = 0.0;
-    std::uint64_t overlay_evicted_bytes = 0;
-    std::uint64_t overlay_staged_bytes  = 0;
+    double prepare_seconds                     = 0.0;
+    double ttft_seconds                        = 0.0;
+    double vision_seconds                      = 0.0;
+    double prefill_seconds                     = 0.0;
+    double decode_seconds                      = 0.0;
+    double prompt_wall_seconds                 = 0.0;
+    double generation_wall_seconds             = 0.0;
+    double total_seconds                       = 0.0;
+    double vision_offload_window_seconds       = 0.0;
+    double vision_offload_evict_seconds        = 0.0;
+    double vision_offload_restore_seconds      = 0.0;
+    std::uint64_t vision_offload_evicted_bytes = 0;
+    std::uint64_t vision_offload_staged_bytes  = 0;
     ninfer::GenerationEngineTiming engine_timing;
 
     SpeculativeBackend speculative_backend    = SpeculativeBackend::None;

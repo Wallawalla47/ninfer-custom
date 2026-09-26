@@ -7,21 +7,19 @@
 namespace ninfer::models {
 
 struct LoadOptions {
-    EnginePurpose purpose                      = EnginePurpose::Generation;
-    bool vision                                = false;
-    VisionResidency vision_residency           = VisionResidency::Resident;
-    std::uint32_t vision_max_merged_tokens     = 32768;
-    SpeculativeBackend speculative             = SpeculativeBackend::None;
-    ProposalHead proposal_head                 = ProposalHead::Full;
-    float rope_yarn_factor                     = 1.0F;
+    EnginePurpose purpose                  = EnginePurpose::Generation;
+    bool vision                            = false;
+    bool vision_offload                    = false;
+    std::uint32_t vision_max_merged_tokens = 32768;
+    SpeculativeBackend speculative         = SpeculativeBackend::None;
+    ProposalHead proposal_head             = ProposalHead::Full;
+    float rope_yarn_factor                 = 1.0F;
 
     bool operator==(const LoadOptions&) const = default;
 
-    // Overlay keeps the vision tower in pinned host RAM and streams it through borrowed
+    // Vision offload keeps the vision tower in pinned system RAM and streams it through borrowed
     // device memory per encode window; requires vision plus an evictable weight ladder.
-    [[nodiscard]] bool overlay_vision() const noexcept {
-        return vision && vision_residency == VisionResidency::Overlay;
-    }
+    [[nodiscard]] bool overlay_vision() const noexcept { return vision && vision_offload; }
 
     [[nodiscard]] bool speculative_enabled() const noexcept {
         return speculative != SpeculativeBackend::None;
@@ -62,13 +60,13 @@ struct LoadOptions {
 }
 
 [[nodiscard]] inline LoadOptions load_options(const EngineOptions& options) noexcept {
-    return {.purpose                    = options.purpose,
-            .vision                     = options.enable_vision,
-            .vision_residency           = options.vision_residency,
-            .vision_max_merged_tokens   = options.vision_max_merged_tokens,
-            .speculative                = options.speculative.backend,
-            .proposal_head              = options.speculative.proposal_head,
-            .rope_yarn_factor            = options.rope_yarn_factor};
+    return {.purpose                  = options.purpose,
+            .vision                   = options.enable_vision,
+            .vision_offload           = options.vision_offload,
+            .vision_max_merged_tokens = options.vision_max_merged_tokens,
+            .speculative              = options.speculative.backend,
+            .proposal_head            = options.speculative.proposal_head,
+            .rope_yarn_factor         = options.rope_yarn_factor};
 }
 
 } // namespace ninfer::models

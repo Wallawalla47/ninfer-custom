@@ -33,7 +33,7 @@ for creating NInfer!
    the same output, by overlapping each decode kernel's launch and weight loading with the kernel
    before it
 7. adds the ability to offload the vision encoder to system RAM (by specifying
-   `--vision-residency overlay`) based on the work of Valeriy Selitskiy
+   `--vision-offload on`) based on the work of Valeriy Selitskiy
    ([iamwavecut](https://github.com/iamwavecut))
 8. enables the use of YaRN context extension for scaling context up to 1m tokens (by specifying
    `--rope-yarn-factor F`, where F is a number from 1 to 4)
@@ -404,9 +404,9 @@ Against the flag off (Qwen3.8-27B NVIDIA NVFP4, int8 KV): new-prompt prefill +3.
   scale-search method for groupwise quantisation.
 - **Q8 MTP** and a **general BF16 GEMM fallback** for shapes without a dedicated kernel.
 - **`--rope-yarn-factor F`** for YaRN context extension (F from 1 to 4, up to 1M tokens of context).
-- **`--vision-residency overlay`** keeps the vision tower in pinned host RAM and streams it to the
-  GPU when needed, and **`--vision-max-merged N`** bounds the merged vision tokens per image or
-  video (64–32768). Based on the original work by
+- **`--vision-offload on`** keeps the vision tower in pinned system RAM instead of VRAM and streams
+  it to the GPU while an image is encoded (off by default), and **`--vision-max-merged N`** bounds
+  the merged vision tokens per image or video (64–32768). Based on the original work by
   [Valeriy Selitskiy (iamwavecut)](https://github.com/iamwavecut), rewritten for this engine.
 
 ### Windows

@@ -93,8 +93,8 @@ std::string usage_text(const char* argv0) {
            "       [--stop-token-id N]... [--stop <text>]... [--reasoning-stop <text>]...\n"
            "       [--chat-template FILE]\n"
            "       [--raw-output] [--print-token-ids] [--no-thinking] [--thinking-budget N]\n"
-           "       [--reasoning-effort none|minimal|low|medium|high|xhigh|max] [--vision] "
-           "[--vision-residency R] [--vision-max-merged N]\n"
+           "       [--reasoning-effort none|minimal|low|medium|high|xhigh|max]\n"
+           "       [--vision] [--vision-offload on|off] [--vision-max-merged N]\n"
            "       [--no-cuda-graph]\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n"
            "\n"
@@ -148,8 +148,8 @@ std::string usage_text(const char* argv0) {
            "\n"
            "VISION (off by default)\n"
            "  --vision                 enable image/video input\n"
-           "  --vision-residency R     resident (default) or overlay (tower stays in pinned\n"
-           "                           host RAM; adds no steady-state VRAM)\n"
+           "  --vision-offload on|off  keep the vision tower in pinned system RAM instead of\n"
+           "                           VRAM (default off; on adds no steady-state VRAM)\n"
            "  --vision-max-merged N    max merged vision tokens per item (default 32768);\n"
            "                           oversized media downscales at preprocessing\n"
            "\n"
@@ -239,14 +239,14 @@ Options parse_options(int argc, char** argv) {
             options.reasoning_effort = parse_reasoning_effort(value(arg));
         } else if (arg == "--vision") {
             options.enable_vision = true;
-        } else if (arg == "--vision-residency") {
-            const std::string_view residency = value(arg);
-            if (residency == "resident") {
-                options.vision_residency = ninfer::VisionResidency::Resident;
-            } else if (residency == "overlay") {
-                options.vision_residency = ninfer::VisionResidency::Overlay;
+        } else if (arg == "--vision-offload") {
+            const std::string_view mode = value(arg);
+            if (mode == "on") {
+                options.vision_offload = true;
+            } else if (mode == "off") {
+                options.vision_offload = false;
             } else {
-                throw std::invalid_argument("--vision-residency accepts resident or overlay");
+                throw std::invalid_argument("--vision-offload accepts on or off");
             }
         } else if (arg == "--vision-max-merged") {
             const std::uint32_t merged = parse_u32(value(arg), "vision-max-merged");

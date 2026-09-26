@@ -155,7 +155,7 @@ std::unique_ptr<Model> materialize_model(LoadPlan&& plan, DeviceContext& device,
         if (!EvictableWeightPool::supported(device.device)) {
             throw std::invalid_argument(
                 "this device does not support virtual memory management, so "
-                "--vision-residency overlay cannot be used; select resident");
+                "--vision-offload on cannot be used; select off");
         }
         pool = std::make_unique<EvictableWeightPool>(EvictableWeightPool::Config{
             .arena_bytes          = data->materialization.device_capacity_bytes,

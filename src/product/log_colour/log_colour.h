@@ -252,7 +252,7 @@ inline constexpr std::size_t kFamilySize        = kPalette.size() / kColorableFa
 // — the clause-opening name colours the whole clause, so a statistic keeps one
 // colour as its value changes. A key=value token anywhere names its own
 // statistic (a bare token after one inherits its colour), which keeps legacy
-// key=value tails such as the overlay window fields of a done line colourable.
+// key=value tails such as the vision offload fields of a done line colourable.
 // A line classified as LogFamily::None (a request-start "settings" line) is
 // returned entirely unchanged.
 [[nodiscard]] inline std::string colourise_stats_line(std::string_view line, bool enabled) {

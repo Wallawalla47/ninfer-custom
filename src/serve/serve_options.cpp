@@ -190,10 +190,10 @@ std::string serve_usage_text(const char* argv0) {
            "\n"
            "VISION (off by default)\n"
            "  --vision                   enable media and load the Vision GPU allocations\n"
-           "  --vision-residency R       resident (default fixed device allocation) or overlay\n"
-           "                             (vision tower kept in pinned host RAM; overlay adds no\n"
-           "                             steady-state VRAM and borrows device memory only while\n"
-           "                             encoding an image; requires --vision)\n"
+           "  --vision-offload on|off    keep the vision tower in pinned system RAM instead of\n"
+           "                             VRAM (default off); on adds no steady-state VRAM and\n"
+           "                             borrows device memory only while encoding an image;\n"
+           "                             requires --vision\n"
            "  --vision-max-merged N      bound merged vision tokens, 64-32768 (default 32768)\n"
            "  --media-cache-mib N        retained decoded-media cache\n"
            "                             (default 1024; 0 disables)\n"
@@ -249,7 +249,7 @@ std::string serve_usage_text(const char* argv0) {
            "  --vram-headroom-mib requires --kv-capacity auto (the default with the new\n"
            "  prefix caching system).\n"
            "  Options of the two prefix caching systems cannot be mixed.\n"
-           "  --vision-residency overlay requires --vision.\n"
+           "  --vision-offload on requires --vision.\n"
            "  --ngram-draft-tokens above 15 requires --max-concurrency 1.\n"
            "  --ngram-native-sessions requires --ngram-archive-mib.\n"
            "  --rope-yarn-factor is startup-fixed, finite [1,4] (default 1); it extends the\n"
@@ -538,14 +538,14 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             }
         } else if (arg == "--vision") {
             options.enable_vision = true;
-        } else if (arg == "--vision-residency") {
-            const std::string_view value = require_value("--vision-residency");
-            if (value == "resident") {
-                options.vision_residency = ninfer::VisionResidency::Resident;
-            } else if (value == "overlay") {
-                options.vision_residency = ninfer::VisionResidency::Overlay;
+        } else if (arg == "--vision-offload") {
+            const std::string_view value = require_value("--vision-offload");
+            if (value == "on") {
+                options.vision_offload = true;
+            } else if (value == "off") {
+                options.vision_offload = false;
             } else {
-                throw std::invalid_argument("--vision-residency accepts resident or overlay");
+                throw std::invalid_argument("--vision-offload accepts on or off");
             }
         } else if (arg == "--vision-max-merged") {
             const std::uint32_t merged =
@@ -693,8 +693,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         throw std::invalid_argument("--prefill-chunk must be a positive multiple of 128");
     }
     product::validate_speculative_cli_options(options.speculative);
-    if (options.vision_residency == ninfer::VisionResidency::Overlay && !options.enable_vision) {
-        throw std::invalid_argument("--vision-residency overlay requires --vision");
+    if (options.vision_offload && !options.enable_vision) {
+        throw std::invalid_argument("--vision-offload on requires --vision");
     }
     // A speculative decode frame is allocated at the wider of the neural and ngram draft windows
     // and cannot be narrowed for a multi-request batch. The GDN conv-record workspace admits at

@@ -54,7 +54,7 @@ public:
     }
 
     // Overlay vision assets (evictable pool + pinned block + layout); present only when the
-    // model was loaded with VisionResidency::Overlay.
+    // model was loaded with vision offload on.
     [[nodiscard]] const std::optional<VisionOverlayAssets>& overlay_vision() const noexcept {
         return overlay_vision_;
     }
