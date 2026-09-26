@@ -1093,7 +1093,7 @@ in append mode and flushes every event, so successive model or MTP blocks may sh
 file. The parent directory must already exist. Failure to open the file aborts startup; the log path
 is also rejected if it resolves to the model artifact.
 
-Every line is one `ninfer_serve_request_log` schema-v25 JSON object. All events carry
+Every line is one `ninfer_serve_request_log` schema-v26 JSON object. All events carry
 `timestamp_unix_ms` and a process-unique `server_instance_id`; request IDs are monotonic only within
 that server instance. Successful request-start records include request-scoped acquisition,
 media-preprocessing wall/work, tokenizer, cache hit/miss/single-flight, and payload-size fields;
@@ -1154,6 +1154,10 @@ For `server_start.memory`, `workspace.capacity_bytes` is the only physical works
 When Vision is enabled, `vision_workspace` reports the aggregate prompt and maximum-item token
 bounds plus encode peak and handoff layout/usage within that same allocation; these bytes must not
 be added to `workspace.capacity_bytes`. The field is `null` when Vision is disabled.
+under, `0` when that budget is not in use. `cuda_graph_allowance_bytes` is the CUDA Graph memory
+the KV sizing reserved, and `cuda_graph_measured_bytes` the Device memory graph preparation
+actually took at startup (`0` without CUDA Graphs); the startup log warns when the second exceeds
+the first.
 
 `request_done.engine_timing` separates FIFO `queue_wait_seconds`, blocking
 `device_wait_exposed_seconds`, and five mutually exclusive Host-active exposure phases under
@@ -1256,8 +1260,17 @@ answer quality; validate the workload before deployment.
 
 `--max-context` is each sequence's logical ceiling. `--kv-capacity` fixes the shared Main Text KV
 pool used by active requests and retained prefixes. `auto` accounts for the complete enabled runtime
-and leaves 1 GiB of sizing headroom; omitting the option makes it follow `--max-context`. Capacity
-resolves once at startup.
+and leaves 1 GiB of sizing headroom; omitting the option makes it follow `--max-context`. The
+CUDA Graph driver-state allowance reserved against that budget is 64 MiB plus 4 MiB for every
+decode-graph executable the engine instantiates: one per topology class of each captured family,
+for every batch size up to `--max-concurrency` (DFlash and DFlash2 capture a second family when
+n-gram drafting is enabled). A speculative family is a Forward/Finish pair: MTP's Finish keeps
+the Forward topology classes, a DFlash Finish adds one executable per batch size. Measured on an
+RTX 5090 before that split, an executable took 2.2-2.9 MiB, and up to 4.1 MiB when MTP verified a
+15-wide n-gram window at batch 4-8; DFlash2 with `--max-concurrency 2` now reserves 120 MiB. The
+startup log and `server_start` report both the allowance and the memory the graphs actually
+used, and the log warns when the second exceeds the first.
+Capacity resolves once at startup.
 
 Before each prefill, decode or replay unit, the runtime reserves the additional pages and temporary
 storage required by that unit. It first reclaims inactive cache resources when capacity is short.
