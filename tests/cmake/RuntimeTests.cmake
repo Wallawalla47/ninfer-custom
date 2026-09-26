@@ -39,3 +39,9 @@ add_test(NAME ninfer_json_schema_oracle_test
   COMMAND ${CMAKE_COMMAND} -E env
     "NINFER_SCHEMA_PROBE=$<TARGET_FILE:ninfer_json_schema_test>"
     ${Python3_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/text/test_json_schema.py)
+
+ninfer_add_test(ninfer_engine_options_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_options.cpp"
+  LIBRARIES ninfer_engine ninfer_core)
+
+set_tests_properties(ninfer_engine_options_test PROPERTIES SKIP_RETURN_CODE 77)
