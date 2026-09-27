@@ -331,6 +331,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_ordinary_batch(
         timing.end_wait();
 
         const double seconds = std::chrono::duration<double>(Clock::now() - start).count();
+        const double share   = seconds / static_cast<double>(lanes.size());
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence    = active_sequence(lanes[row]);
             RequestControl& request    = requests[lanes[row]];
@@ -352,6 +353,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_ordinary_batch(
                                                  .produced      = 1};
             request.lifecycle = Lifecycle::Pending;
             request.timings.decode_seconds += seconds;
+            request.timings.decode_share_seconds += share;
         }
         return runtime::BatchedGeneratedRound{
             .tokens =
@@ -589,6 +591,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
         timing.end_wait();
 
         const double seconds = std::chrono::duration<double>(Clock::now() - started).count();
+        const double share   = seconds / static_cast<double>(lanes.size());
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence       = active_sequence(lanes[row]);
             RequestControl& request       = requests[lanes[row]];
@@ -642,6 +645,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
             };
             request.lifecycle = Lifecycle::Pending;
             request.timings.decode_seconds += seconds;
+            request.timings.decode_share_seconds += share;
         }
         return runtime::BatchedGeneratedRound{
             .tokens     = std::span<const TokenId>(mtp_host_egress->licensed_tokens.data(),
@@ -868,6 +872,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
         timing.end_wait();
 
         const double seconds = std::chrono::duration<double>(Clock::now() - started).count();
+        const double share   = seconds / static_cast<double>(lanes.size());
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence       = active_sequence(lanes[row]);
             RequestControl& request       = requests[lanes[row]];
@@ -920,6 +925,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
             };
             request.lifecycle = Lifecycle::Pending;
             request.timings.decode_seconds += seconds;
+            request.timings.decode_share_seconds += share;
         }
         return runtime::BatchedGeneratedRound{
             .tokens     = std::span<const TokenId>(dflash_host_egress->licensed_tokens.data(),
