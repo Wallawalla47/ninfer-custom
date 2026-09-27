@@ -21,6 +21,7 @@
 #include <functional>
 #include <optional>
 #include <span>
+#include <vector>
 
 namespace ninfer::models::qwen3_5::execution {
 
@@ -56,8 +57,11 @@ struct PrefillContext {
     std::uint32_t mtp_proposal_extent                       = 0;
     const qwen3_5::DFlashDecodeIngress* dflash_host_ingress = nullptr;
     // Per-model-layer events of a Host restore still landing: the chunk's first pass over the
-    // layer stack waits for each layer's copies.
-    std::span<const cudaEvent_t> layer_ready;
+    // layer stack waits for each layer's copies. Owned copy of the handles, not a view of the
+    // landing batch: HybridPrefixCache::poll() can retire that batch (for example from
+    // commit_sequence_kv on the MTP bridge) before the chunk runs, which would leave a view
+    // dangling. Retired events go back to the spare pool, so the handles stay valid.
+    std::vector<cudaEvent_t> layer_ready;
 };
 
 struct OrdinaryBatchContext {

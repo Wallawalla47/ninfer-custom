@@ -1054,7 +1054,9 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             staged.initial_mtp_extent,
             dflash_host_ingress};
         // The first pass after a Host restore waits for each layer's copies (hybrid spec §6.5).
-        schedule_state.layer_ready = hybrid_take_restore_layers(sequence.lane);
+        const std::span<const cudaEvent_t> restore_layers =
+            hybrid_take_restore_layers(sequence.lane);
+        schedule_state.layer_ready.assign(restore_layers.begin(), restore_layers.end());
 
         if (staged.mtp_bridge == MtpBridgeMode::BeforeSuffix) {
             if (staged.cursor != staged.base || staged.base == 0 ||
@@ -1153,7 +1155,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                 }
                 timing.include(result.timing);
                 timing.resume_post();
-                schedule_state.layer_ready = {};
+                schedule_state.layer_ready.clear();
                 if (result.processed_tokens == 0 || result.processed_tokens > remaining) {
                     throw std::logic_error("ordinary prefill chunk made invalid progress");
                 }
