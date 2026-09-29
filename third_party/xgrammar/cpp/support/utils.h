@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <stdexcept>
 #include <tuple>
@@ -360,6 +361,10 @@ class Result {
 // to raise an error. This macro manually mark them as unreachable to avoid warnings.
 #ifdef __GNUC__
 #define XGRAMMAR_UNREACHABLE() __builtin_unreachable()
+#elif defined(_MSC_VER)
+// MSVC rejects a value-returning function whose only path ends here (C4716) unless it is
+// visibly non-returning.
+#define XGRAMMAR_UNREACHABLE() std::abort()
 #else
 #define XGRAMMAR_UNREACHABLE()
 #endif

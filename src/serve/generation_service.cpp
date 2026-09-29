@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <iterator>
 #include <mutex>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
