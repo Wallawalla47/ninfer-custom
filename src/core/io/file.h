@@ -9,8 +9,15 @@ namespace ninfer::io {
 
 enum class ReadMode { Buffered, Direct };
 
+#ifdef _WIN32
+// A Win32 HANDLE value; -1 is INVALID_HANDLE_VALUE, so negative still means no file.
+using FileDescriptor = std::intptr_t;
+#else
+using FileDescriptor = int;
+#endif
+
 struct FileView {
-    int descriptor               = -1;
+    FileDescriptor descriptor    = -1;
     std::uint64_t bytes          = 0;
     ReadMode mode                = ReadMode::Buffered;
     std::size_t memory_alignment = 1;

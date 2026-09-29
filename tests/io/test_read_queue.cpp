@@ -2,7 +2,11 @@
 #include "core/io/read_queue.h"
 #include "core/buffer.h"
 
-#include <liburing.h>
+#ifndef _WIN32
+#    include <liburing.h>
+#else
+#    include <process.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -10,6 +14,7 @@
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -40,10 +45,17 @@ struct Files {
     static constexpr std::size_t bytes = 4096 + 123;
 
     Files() {
+#ifdef _WIN32
+        directory = std::filesystem::temp_directory_path() /
+                    ("ninfer-io-" + std::to_string(::_getpid()));
+        if (!std::filesystem::create_directory(directory))
+            throw std::runtime_error("temporary directory already exists");
+#else
         std::string name = (std::filesystem::temp_directory_path() / "ninfer-io-XXXXXX").string();
         auto* path       = ::mkdtemp(name.data());
         if (!path) throw std::runtime_error("mkdtemp failed");
         directory = path;
+#endif
         std::vector<std::byte> data(bytes);
         for (std::size_t file = 0; file < 2; ++file) {
             for (std::size_t i = 0; i < data.size(); ++i) data[i] = pattern(file, i);
@@ -144,6 +156,8 @@ void run() {
     require(queue.wait() == ReadWake::Signalled, "notification did not wake idle queue");
     notifier.join();
 
+#ifndef _WIN32
+    // Submission and kernel-read fault injection wraps io_uring_submit at link time.
     require(queue.try_enqueue({0, 0, 0, 4096, 1234}) == ReadAdmission::Accepted,
             "error probe rejected");
     fail_submit = true;
@@ -153,6 +167,28 @@ void run() {
     while (!queue.poll(output)) (void)queue.wait();
     require(output[0].tag == 1234 && output[0].error == EBADF && !output[0].bytes,
             "kernel I/O failure was not delivered");
+#else
+    // Coalesced wakes from before a wait report one Signalled, and a wake consumed while polling
+    // is still reported by the next wait.
+    queue.wake();
+    queue.wake();
+    require(queue.wait() == ReadWake::Signalled, "pending notification was lost");
+    require(queue.try_enqueue({1, 1, 0, 4096, 77}) == ReadAdmission::Accepted, "wake probe rejected");
+    queue.submit();
+    queue.wake();
+    std::size_t delivered = 0;
+    while (!delivered) {
+        delivered = queue.poll(output);
+        if (!delivered && queue.wait() == ReadWake::Signalled) break;
+    }
+    if (!delivered) {
+        while (!queue.poll(output)) (void)queue.wait();
+    } else {
+        require(queue.wait() == ReadWake::Signalled, "wake consumed by poll was lost");
+    }
+    require(output[0].tag == 77 && !output[0].error && output[0].bytes == 4096,
+            "wake probe read differs");
+#endif
 
     require(queue.try_enqueue({0, 0, 4096, 4096, 9999}) == ReadAdmission::Accepted,
             "close probe rejected");
@@ -175,6 +211,7 @@ void run() {
 }
 } // namespace
 
+#ifndef _WIN32
 extern "C" int __real_io_uring_submit(io_uring* ring);
 
 extern "C" int __wrap_io_uring_submit(io_uring* ring) {
@@ -202,6 +239,7 @@ extern "C" int __wrap_io_uring_submit(io_uring* ring) {
     }
     return __real_io_uring_submit(ring);
 }
+#endif
 
 int main() {
     try {

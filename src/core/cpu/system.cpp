@@ -1,7 +1,12 @@
 #include "core/cpu/system.h"
 
 #include <hwloc.h>
-#include <cpuid.h>
+#ifdef _MSC_VER
+#    include <immintrin.h>
+#    include <intrin.h>
+#else
+#    include <cpuid.h>
+#endif
 
 #include <algorithm>
 #include <cerrno>
@@ -42,6 +47,39 @@ CpuAffinity cpu_list(hwloc_const_bitmap_t bitmap) {
     hwloc_bitmap_foreach_end();
     return result;
 }
+
+#ifdef _MSC_VER
+// The GCC <cpuid.h> interface the feature probes use, over MSVC's __cpuid/__cpuidex intrinsics.
+bool get_cpuid(unsigned leaf, unsigned* eax, unsigned* ebx, unsigned* ecx, unsigned* edx) {
+    int registers[4];
+    __cpuid(registers, static_cast<int>(leaf & 0x80000000U));
+    if (static_cast<unsigned>(registers[0]) < leaf) return false;
+    __cpuidex(registers, static_cast<int>(leaf), 0);
+    *eax = static_cast<unsigned>(registers[0]);
+    *ebx = static_cast<unsigned>(registers[1]);
+    *ecx = static_cast<unsigned>(registers[2]);
+    *edx = static_cast<unsigned>(registers[3]);
+    return true;
+}
+
+unsigned get_cpuid_max(unsigned leaf) {
+    int registers[4];
+    __cpuid(registers, static_cast<int>(leaf));
+    return static_cast<unsigned>(registers[0]);
+}
+
+void cpuid_count(unsigned leaf, unsigned subleaf, unsigned& eax, unsigned& ebx, unsigned& ecx,
+                 unsigned& edx) {
+    int registers[4];
+    __cpuidex(registers, static_cast<int>(leaf), static_cast<int>(subleaf));
+    eax = static_cast<unsigned>(registers[0]);
+    ebx = static_cast<unsigned>(registers[1]);
+    ecx = static_cast<unsigned>(registers[2]);
+    edx = static_cast<unsigned>(registers[3]);
+}
+
+std::uint64_t read_xcr0() { return _xgetbv(0); }
+#endif
 
 bool data_cache(hwloc_obj_type_t type) {
     return type == HWLOC_OBJ_L1CACHE || type == HWLOC_OBJ_L2CACHE || type == HWLOC_OBJ_L3CACHE ||
@@ -177,6 +215,42 @@ CpuFeatures cpu_detail::usable_features(const FeatureRegisters& r) noexcept {
     return result;
 }
 
+#ifdef _MSC_VER
+CpuFeatures current_cpu_features() noexcept {
+    cpu_detail::FeatureRegisters state;
+    unsigned eax, ebx, ecx, edx;
+    if (!get_cpuid(1, &eax, &ebx, &ecx, &edx)) return {};
+    state.leaf1_ecx = ecx;
+    if ((ecx & ((1U << 26) | (1U << 27))) == ((1U << 26) | (1U << 27))) state.xcr0 = read_xcr0();
+    if (get_cpuid_max(0) >= 7) {
+        cpuid_count(7, 0, eax, ebx, ecx, edx);
+        const auto max_subleaf = eax;
+        state.leaf7_0_ebx      = ebx;
+        state.leaf7_0_ecx      = ecx;
+        if (max_subleaf >= 1) {
+            cpuid_count(7, 1, eax, ebx, ecx, edx);
+            state.leaf7_1_eax = eax;
+        }
+    }
+    return cpu_detail::usable_features(state);
+}
+
+CpuIdentity current_cpu_identity() noexcept {
+    CpuIdentity result;
+    unsigned eax, ebx, ecx, edx;
+    cpuid_count(0, 0, eax, ebx, ecx, edx);
+    std::memcpy(result.vendor.data(), &ebx, 4);
+    std::memcpy(result.vendor.data() + 4, &edx, 4);
+    std::memcpy(result.vendor.data() + 8, &ecx, 4);
+    if (!get_cpuid(1, &eax, &ebx, &ecx, &edx)) return result;
+    const auto family = (eax >> 8) & 15U;
+    result.family     = family + (family == 15 ? (eax >> 20) & 255U : 0);
+    result.model    = ((eax >> 4) & 15U) | ((family == 6 || family == 15) ? (eax >> 12) & 240U : 0);
+    result.stepping = eax & 15U;
+    result.virtualized = (ecx & (1U << 31)) != 0;
+    return result;
+}
+#else
 CpuFeatures current_cpu_features() noexcept {
     cpu_detail::FeatureRegisters state;
     unsigned eax, ebx, ecx, edx;
@@ -215,6 +289,7 @@ CpuIdentity current_cpu_identity() noexcept {
     result.virtualized = (ecx & (1U << 31)) != 0;
     return result;
 }
+#endif
 
 std::vector<std::thread> cpu_detail::start_workers(std::uint32_t count,
                                                    std::function<void(std::uint32_t)> initialize,

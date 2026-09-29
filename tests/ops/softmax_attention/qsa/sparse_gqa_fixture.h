@@ -9,6 +9,10 @@
 #include <memory>
 #include <numeric>
 
+#ifdef _MSC_VER
+#    include <immintrin.h>
+#endif
+
 namespace ninfer::test::qsa::sparse {
 
 inline std::uint32_t hash(std::uint32_t x) {
@@ -21,9 +25,19 @@ inline std::uint32_t hash(std::uint32_t x) {
 
 inline float sample(std::uint32_t i) { return (int(hash(i) % 10001) - 5000) / 3000.0F; }
 
+#ifdef _MSC_VER
+// MSVC has no _Float16: the same IEEE round-to-nearest-even conversions through F16C.
+inline std::uint16_t half(float x) {
+    return static_cast<std::uint16_t>(
+        _mm_extract_epi16(_mm_cvtps_ph(_mm_set_ss(x), _MM_FROUND_TO_NEAREST_INT), 0));
+}
+
+inline float unhalf(std::uint16_t x) { return _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si128(x))); }
+#else
 inline std::uint16_t half(float x) { return std::bit_cast<std::uint16_t>(_Float16(x)); }
 
 inline float unhalf(std::uint16_t x) { return float(std::bit_cast<_Float16>(x)); }
+#endif
 
 struct Plane {
     int leading;

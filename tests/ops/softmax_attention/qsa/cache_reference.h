@@ -13,6 +13,10 @@
 #include <stdexcept>
 #include <vector>
 
+#ifdef _MSC_VER
+#    include <immintrin.h>
+#endif
+
 namespace ninfer::test::qsa::prepare {
 
 enum class Encoding { Bf16, Fp16, Int8, Fp8, Nvfp4 };
@@ -64,11 +68,23 @@ inline void write_u16(std::vector<std::uint8_t>& bytes, std::size_t offset, std:
     std::memcpy(bytes.data() + offset, &word, sizeof(word));
 }
 
+#ifdef _MSC_VER
+// MSVC has no _Float16: the same IEEE round-to-nearest-even conversions through F16C.
+inline std::uint16_t fp16_encode(float x) {
+    return static_cast<std::uint16_t>(
+        _mm_extract_epi16(_mm_cvtps_ph(_mm_set_ss(x), _MM_FROUND_TO_NEAREST_INT), 0));
+}
+
+inline float fp16_decode(std::uint16_t x) {
+    return _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si128(x)));
+}
+#else
 inline std::uint16_t fp16_encode(float x) {
     return std::bit_cast<std::uint16_t>(static_cast<_Float16>(x));
 }
 
 inline float fp16_decode(std::uint16_t x) { return float(std::bit_cast<_Float16>(x)); }
+#endif
 
 inline double positive_fp8(int code) {
     const int exponent = code >> 3, fraction = code & 7;

@@ -18,9 +18,27 @@
 #include <set>
 #include <string>
 
-#include <sys/resource.h>
+#ifdef _WIN32
+#    include <windows.h>
+#    include <psapi.h>
+#else
+#    include <sys/resource.h>
+#endif
 
 namespace {
+
+long peak_rss_kib() {
+#ifdef _WIN32
+    PROCESS_MEMORY_COUNTERS counters{};
+    return ::K32GetProcessMemoryInfo(::GetCurrentProcess(), &counters, sizeof(counters))
+               ? static_cast<long>(counters.PeakWorkingSetSize / 1024)
+               : 0;
+#else
+    rusage usage{};
+    getrusage(RUSAGE_SELF, &usage);
+    return usage.ru_maxrss;
+#endif
+}
 
 using namespace ninfer;
 using namespace ninfer::models;
@@ -356,15 +374,13 @@ int main(int argc, char** argv) {
                 "tokenizer did not survive Reader destruction");
         require(!model->resources().chat_template_jinja.empty(),
                 "template bytes were lost after loading");
-        rusage usage{};
-        getrusage(RUSAGE_SELF, &usage);
         std::cout << path.filename().string()
                   << ": loading and native inputs passed, parents=" << visited.size()
                   << " device_bytes=" << model->storage_stats().device_capacity_bytes
                   << " host_bytes=" << model->storage_stats().host_capacity_bytes
                   << " h2d_bytes=" << model->storage_stats().h2d_bytes
                   << " materialization_seconds=" << model->storage_stats().upload_seconds
-                  << " peak_rss_kib=" << usage.ru_maxrss
+                  << " peak_rss_kib=" << peak_rss_kib()
                   << " V=" << model->resources().public_token_count << '\n';
         model.reset();
         device->synchronize();

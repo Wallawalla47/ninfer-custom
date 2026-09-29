@@ -334,6 +334,8 @@ void gpu(const disk::Table& source, const Input& input) {
     copied.copy_to_host(actual.data(), input.bytes());
     emit(actual.data(), input.bytes());
 
+#ifndef _WIN32
+    // CUDA event failures are injected by GNU ld --wrap, which the MSVC linker does not provide.
     for (bool consumer_failure : {false, true}) {
         const auto failed = prepare(service, input);
         service.seal(failed, input.lengths());
@@ -354,6 +356,7 @@ void gpu(const disk::Table& source, const Input& input) {
         require(rejected && !fail_event_record, "CUDA event failure was not reported");
         until([&] { return try_release(failed); });
     }
+#endif
 
     const auto again = prepare(service, input);
     service.seal(again, input.lengths());
@@ -377,6 +380,7 @@ void gpu(const disk::Table& source, const Input& input) {
 }
 } // namespace
 
+#ifndef _WIN32
 extern "C" cudaError_t __real_cudaEventRecord(cudaEvent_t, cudaStream_t);
 
 extern "C" cudaError_t __wrap_cudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
@@ -386,6 +390,7 @@ extern "C" cudaError_t __wrap_cudaEventRecord(cudaEvent_t event, cudaStream_t st
     }
     return __real_cudaEventRecord(event, stream);
 }
+#endif
 
 int main(int argc, char** argv) {
     try {

@@ -18,6 +18,8 @@ struct Trace {
 Trace trace;
 } // namespace
 
+// Link-time wrappers rely on GNU ld --wrap, which the MSVC linker does not provide.
+#ifndef _WIN32
 extern "C" {
 cudaError_t CUDARTAPI __real_cudaEventRecord(cudaEvent_t, cudaStream_t);
 cudaError_t CUDARTAPI __real_cudaMemcpyAsync(void*, const void*, std::size_t, cudaMemcpyKind,
@@ -92,7 +94,13 @@ cudaError_t CUDARTAPI __wrap_cudaFreeHost(void* p) {
 }
 }
 
+#endif // _WIN32
+
 namespace ninfer::test {
+#ifdef _WIN32
+// Without the wrappers the CUDA failures cannot be injected; the fault cases are skipped.
+void expert_cache_cuda_errors(const ExpertBankSource&, const DeviceContext&) {}
+#else
 void expert_cache_cuda_errors(const ExpertBankSource& source, const DeviceContext& device) {
     const std::array sources{source};
     auto req = describe_expert_cache(sources, {.capacity_bytes = 65536, .max_batch_bytes = 65536});
@@ -124,4 +132,5 @@ void expert_cache_cuda_errors(const ExpertBankSource& source, const DeviceContex
         }
     }
 }
+#endif
 } // namespace ninfer::test

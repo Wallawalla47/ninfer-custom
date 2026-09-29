@@ -1,7 +1,11 @@
 #include "core/cpu/executor.h"
 
 #include <immintrin.h>
-#include <sched.h>
+#ifdef _WIN32
+#    include <windows.h>
+#else
+#    include <sched.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -18,6 +22,15 @@ using namespace ninfer;
 void require(bool value, const char* message) {
     if (!value) throw std::runtime_error(message);
 }
+
+#ifdef _WIN32
+// hwloc numbers Windows processors as group * 64 + number within the group.
+int sched_getcpu() {
+    PROCESSOR_NUMBER processor{};
+    ::GetCurrentProcessorNumberEx(&processor);
+    return static_cast<int>(processor.Group) * 64 + static_cast<int>(processor.Number);
+}
+#endif
 
 struct Environment {
     Environment() { std::fegetenv(&saved); }

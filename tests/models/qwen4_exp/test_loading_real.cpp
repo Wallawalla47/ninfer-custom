@@ -7,9 +7,28 @@
 #include <cstring>
 #include <iostream>
 #include <thread>
-#include <sys/resource.h>
+#ifdef _WIN32
+#    include <windows.h>
+#    include <psapi.h>
+#else
+#    include <sys/resource.h>
+#endif
 
 namespace {
+long peak_rss_kib() {
+#ifdef _WIN32
+    PROCESS_MEMORY_COUNTERS counters{};
+    return ::K32GetProcessMemoryInfo(::GetCurrentProcess(), &counters, sizeof(counters))
+               ? static_cast<long>(counters.PeakWorkingSetSize / 1024)
+               : 0;
+#else
+    struct rusage usage {};
+
+    getrusage(RUSAGE_SELF, &usage);
+    return usage.ru_maxrss;
+#endif
+}
+
 using namespace ninfer;
 namespace q4 = models::qwen4_exp;
 using test::artifact_fixture::require;
@@ -216,14 +235,11 @@ int main(int argc, char** argv) {
             q4::Resources resources(parameters, std::move(*selected), device);
             ple_window(resources, *model, device);
 
-            struct rusage usage {};
-
-            getrusage(RUSAGE_SELF, &usage);
             const auto& s = model->storage_stats();
             std::cout << "loaded host=" << s.host_capacity_bytes
                       << " registered=" << s.registered_host_bytes
                       << " gpu=" << s.device_capacity_bytes << " staging=" << s.peak_staging_bytes
-                      << " read=" << s.read_bytes << " rss_kib=" << usage.ru_maxrss << '\n';
+                      << " read=" << s.read_bytes << " rss_kib=" << peak_rss_kib() << '\n';
         }
         std::cout << "PASS\n";
         return 0;
