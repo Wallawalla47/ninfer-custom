@@ -80,10 +80,7 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
             throw std::logic_error("MTP neural proposal width is outside its supported domain");
         }
         // Forward and Finish derive the same frame view, so Finish reads what Forward wrote.
-        auto frame = state.frame.current_drafts.ne[0] == static_cast<std::int32_t>(k) &&
-                             state.frame.next_drafts.ne[1] == static_cast<std::int32_t>(next_k)
-                         ? state.frame
-                         : state.frame.single_row_prefix(k, next_k);
+        auto frame               = state.frame.narrowed(k, next_k);
         const std::int32_t width = static_cast<std::int32_t>(k) + 1;
         state.execution.work.reset();
         if (phase == SpeculativePhase::Forward) {

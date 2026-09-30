@@ -383,12 +383,11 @@ void ProgramImpl::prepare_graphs() {
         using execution::SpeculativePhase;
         const bool mtp = speculative_backend == SpeculativeBackend::Mtp;
         // Every planned round family captures a Forward/Finish pair at its own width for every
-        // batch size, on the one frame viewed at that width. MTP plans one family at the frame's
-        // native width (the wider of the neural and ngram windows), which an ngram engine reuses
-        // for copy and free-form rounds. DFlash families record ReplaySSM transitions through the
-        // record view of their width; a batch>1 ngram round also runs the drafter so rows
-        // without a copy keep their neural proposal.
-        const std::uint32_t ar_depth = std::min(draft_window, kMtpDecodeMaximumDrafts);
+        // batch size, on the one frame viewed at that width, and records ReplaySSM transitions
+        // through the record view of the same width. Every MTP round proposes the next round's
+        // drafts at the configured neural depth; a batch>1 DFlash ngram round also runs the
+        // drafter so rows without a copy keep their neural proposal.
+        const std::uint32_t ar_depth = neural_draft_window;
         for (SpeculativeRoundFamily& round : round_families) {
             const bool ngram                  = round.shape.kind == SpeculativeRoundKind::Ngram;
             const std::uint32_t verify_drafts = round.shape.verify_drafts;
@@ -406,7 +405,9 @@ void ProgramImpl::prepare_graphs() {
             validate_graph_profiles(forward_profiles, capacity - 1, "speculative forward");
             validate_graph_profiles(finish_profiles, capacity - 1, "speculative finish");
             const auto mtp_context = [&] {
-                execution::MtpBatchContext state{execution_core(),
+                execution::ExecutionCore core = execution_core();
+                core.replay_records           = round_replay_records(verify_drafts);
+                execution::MtpBatchContext state{core,
                                                  decoder->text_kv,
                                                  *decoder->mtp_cache(),
                                                  *io.mtp_decode,
