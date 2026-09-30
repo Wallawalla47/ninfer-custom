@@ -62,8 +62,10 @@ its verified drafts to the Host after the copy overlay, before the target model 
 
 Larger widths can reduce target rounds on long copy spans but increase per-round attention,
 projection, replay and workspace costs, so measure both short and long contexts; the longest
-supported width need not be fastest. Output budgets do not select a different ngram arithmetic
-shape: a copy is sized by the window and context room only, and the output budget limits the
+supported width need not be fastest. Copy rounds therefore verify at the narrowest captured
+width that holds their longest copy: besides `--ngram-draft-tokens`, the Engine captures copy
+families at 7, 15 and 31 drafts when those lie strictly between the neural and ngram windows.
+Output budgets do not select a different ngram arithmetic shape: a copy is sized by the window and context room only, and the output budget limits the
 drafts the round then verifies.
 
 The mixed-FP8 27B target retains 16-bit activations for FP8 residual projections
