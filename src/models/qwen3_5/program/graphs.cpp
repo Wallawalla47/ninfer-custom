@@ -382,23 +382,21 @@ void ProgramImpl::prepare_graphs() {
     if (speculative_backend != SpeculativeBackend::None) {
         using execution::SpeculativePhase;
         const bool mtp = speculative_backend == SpeculativeBackend::Mtp;
-        // MTP has one family pair at the frame's native width. The frame is allocated once at
-        // plan.draft_window (the wider of the neural and ngram windows) and every MTP round
-        // verifies at that width, so an ngram engine reuses it for copy and free-form rounds.
-        // DFlash has a pair per window: each verifies at its own width for every batch size, on
-        // the one frame viewed at that width, and records ReplaySSM transitions through the
-        // record view of the same width. A batch>1 ngram round also runs the drafter so rows
+        // Every planned round family captures a Forward/Finish pair at its own width for every
+        // batch size, on the one frame viewed at that width. MTP plans one family at the frame's
+        // native width (the wider of the neural and ngram windows), which an ngram engine reuses
+        // for copy and free-form rounds. DFlash families record ReplaySSM transitions through the
+        // record view of their width; a batch>1 ngram round also runs the drafter so rows
         // without a copy keep their neural proposal.
         const std::uint32_t ar_depth = std::min(draft_window, kMtpDecodeMaximumDrafts);
-        for (const bool ngram : {false, true}) {
-            if (ngram && (mtp || ngram_draft_window == 0)) { continue; }
-            const std::uint32_t verify_drafts =
-                mtp ? draft_window : (ngram ? ngram_draft_window : neural_draft_window);
+        for (SpeculativeRoundFamily& round : round_families) {
+            const bool ngram                  = round.shape.kind == SpeculativeRoundKind::Ngram;
+            const std::uint32_t verify_drafts = round.shape.verify_drafts;
             const auto prepare = [&, verify_drafts](std::uint32_t frontier, std::uint32_t batch) {
                 prepare_representative(frontier, batch, verify_drafts, verify_drafts);
             };
-            auto& forward_family = ngram ? ngram_forward_graphs : speculative_forward_graphs;
-            auto& finish_family  = ngram ? ngram_finish_graphs : speculative_finish_graphs;
+            auto& forward_family = round.forward;
+            auto& finish_family  = round.finish;
             const auto forward_profiles =
                 mtp ? mtp_graph_profiles(capacity, verify_drafts, ar_depth)
                     : dflash_graph_profiles(speculative_backend, capacity, verify_drafts);
