@@ -17,7 +17,7 @@ void target_verify_forward(ExecutionCore& execution, TextContext& card, TargetVe
         if (frame.proposal_q.data == nullptr || frame.feature_sink == nullptr) {
             throw std::logic_error("tree verification requires DFlash2 sparse acceptance");
         }
-        card.set_verification_tree(&frame.tree_rows, &frame.tree_masks, frame.tree_paths);
+        card.set_verification_tree(&frame.tree_rows, &frame.tree_masks);
     }
     if (frame.feature_sink != nullptr) {
         card.target_verify_batch(frame.ids, frame.cache_positions, frame.rope_positions,
@@ -30,7 +30,7 @@ void target_verify_forward(ExecutionCore& execution, TextContext& card, TargetVe
                                  envelope, frame.target_hidden, frame.target_logits,
                                  frame.target_tokens);
     }
-    if (tree) { card.set_verification_tree(nullptr, nullptr, 0); }
+    if (tree) { card.set_verification_tree(nullptr, nullptr); }
 }
 
 void target_accept(ExecutionCore& execution, Tensor& continuation_hidden_store, TextContext& card,
