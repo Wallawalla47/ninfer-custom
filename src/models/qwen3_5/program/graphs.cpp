@@ -200,9 +200,12 @@ void ProgramImpl::prepare_graphs() {
             }
             cache.page_pool().zero_pages(pages, device.stream);
         };
+    // capture_tree selects a DFlash2 tree round: rows whose whole tree fits verify a tree of
+    // capture_drafts + 1 columns built from capture_proposal_drafts main-chain proposals.
     const auto prepare_representative = [&](std::uint32_t frontier, std::uint32_t batch_size,
                                             std::uint32_t capture_drafts,
-                                            std::uint32_t capture_proposal_drafts) {
+                                            std::uint32_t capture_proposal_drafts,
+                                            bool capture_tree = false) {
         if (batch_size == 0 || batch_size > max_concurrency) {
             throw std::logic_error("CUDA Graph representative batch is invalid");
         }
@@ -235,9 +238,11 @@ void ProgramImpl::prepare_graphs() {
         if (io.dflash_decode) {
             *dflash_host_ingress = {};
             *dflash_host_egress  = {};
-            const std::uint32_t extent =
-                std::min(capture_proposal_drafts, capacity - frontier - 1U);
             const std::uint32_t width = capture_drafts + 1U;
+            const bool tree_row       = capture_tree && capacity - frontier - 1U >= capture_drafts;
+            const std::uint32_t extent =
+                tree_row ? capture_drafts
+                         : std::min(capture_proposal_drafts, capacity - frontier - 1U);
             for (std::uint32_t row = 0; row < batch_size; ++row) {
                 for (std::uint32_t step = 0; step < capture_drafts; ++step) {
                     const auto base = row * capture_drafts * ops::kSparseSpeculativeCandidates +
@@ -263,9 +268,10 @@ void ProgramImpl::prepare_graphs() {
                 dflash_host_ingress->target_valid_columns[row] =
                     static_cast<std::int32_t>(extent + 1U);
                 for (std::uint32_t column = 0; column < width; ++column) {
-                    dflash_host_ingress->target_rope_positions[row * width + column] =
-                        checked_i32(frontier + std::min(column, extent),
-                                    "graph representative DFlash target RoPE position");
+                    // The device adds a tree column's depth to the anchor position.
+                    const std::uint32_t offset = tree_row ? 0U : std::min(column, extent);
+                    dflash_host_ingress->target_rope_positions[row * width + column] = checked_i32(
+                        frontier + offset, "graph representative DFlash target RoPE position");
                 }
                 dflash_host_ingress->text_kv_table_rows[row]      = static_cast<std::int32_t>(row);
                 dflash_host_ingress->dflash_kv_table_rows[row]    = static_cast<std::int32_t>(row);
@@ -389,16 +395,27 @@ void ProgramImpl::prepare_graphs() {
         // batch size, on the one frame viewed at that width, and records ReplaySSM transitions
         // through the record view of the same width. Every MTP round proposes the next round's
         // drafts at the configured neural depth; a batch>1 DFlash ngram round also runs the
-        // drafter so rows without a copy keep their neural proposal.
+        // drafter so rows without a copy keep their neural proposal. A DFlash2 tree family serves
+        // only the batch sizes that may verify its width. Chain families serve every batch size:
+        // a round with a constrained row verifies the chain whatever the tree table selects.
         const std::uint32_t ar_depth = neural_draft_window;
         for (SpeculativeRoundFamily& round : round_families) {
             const bool ngram                  = round.shape.kind == SpeculativeRoundKind::Ngram;
+            const bool tree                   = round.shape.kind == SpeculativeRoundKind::Tree;
             const std::uint32_t verify_drafts = round.shape.verify_drafts;
+            const auto serves                 = [&](std::uint32_t batch) {
+                return !tree || tree_widths.tree(batch, verify_drafts + 1U);
+            };
+            bool used = false;
+            for (std::uint32_t batch = 1; batch <= max_concurrency; ++batch) {
+                used = used || serves(batch);
+            }
+            if (!used) { continue; }
             // The DFlash drafter always proposes at its own width.
             const std::uint32_t proposal_drafts = mtp ? verify_drafts : neural_draft_window;
-            const auto prepare = [&, verify_drafts, proposal_drafts](std::uint32_t frontier,
-                                                                     std::uint32_t batch) {
-                prepare_representative(frontier, batch, verify_drafts, proposal_drafts);
+            const auto prepare = [&, verify_drafts, proposal_drafts, tree](std::uint32_t frontier,
+                                                                           std::uint32_t batch) {
+                prepare_representative(frontier, batch, verify_drafts, proposal_drafts, tree);
             };
             auto& forward_family = round.forward;
             auto& finish_family  = round.finish;
@@ -437,6 +454,8 @@ void ProgramImpl::prepare_graphs() {
                                                     dflash_draft_handoff->ready};
                 state.ngram                  = ngram;
                 state.neural_proposal_drafts = neural_draft_window;
+                state.tree                   = tree;
+                state.tree_paths             = draft_tree_paths;
                 return state;
             };
             const auto target_envelope = [&](std::uint32_t frontier) {
@@ -478,11 +497,15 @@ void ProgramImpl::prepare_graphs() {
                 }
             };
 
+            std::uint32_t warm_batch = 1;
+            while (!serves(warm_batch)) { ++warm_batch; }
             const auto code_warm = forward_profiles.front();
-            prepare(code_warm.min, 1);
+            prepare(code_warm.min, warm_batch);
             device.synchronize();
-            run(SpeculativePhase::Forward, 1, code_warm.min, code_warm.max, nullptr);
-            run(SpeculativePhase::Finish, 1, code_warm.min, code_warm.max, nullptr);
+            run(SpeculativePhase::Forward, static_cast<std::int32_t>(warm_batch), code_warm.min,
+                code_warm.max, nullptr);
+            run(SpeculativePhase::Finish, static_cast<std::int32_t>(warm_batch), code_warm.min,
+                code_warm.max, nullptr);
             device.synchronize();
 
             for (const auto phase : {SpeculativePhase::Forward, SpeculativePhase::Finish}) {
@@ -491,6 +514,7 @@ void ProgramImpl::prepare_graphs() {
                 const auto& planned_profiles = forward ? forward_profiles : finish_profiles;
                 family.profiles.reserve(planned_profiles.size() * max_concurrency);
                 for (std::uint32_t batch = 1; batch <= max_concurrency; ++batch) {
+                    if (!serves(batch)) { continue; }
                     for (const auto planned : planned_profiles) {
                         family.profiles.emplace_back();
                         auto& profile                  = family.profiles.back();
@@ -502,8 +526,12 @@ void ProgramImpl::prepare_graphs() {
                         capture(phase, profile);
                     }
                 }
-                const char* label = forward ? (ngram ? "ngram forward" : "speculative forward")
-                                            : (ngram ? "ngram finish" : "speculative finish");
+                const char* label = forward ? (ngram  ? "ngram forward"
+                                               : tree ? "tree forward"
+                                                      : "speculative forward")
+                                            : (ngram  ? "ngram finish"
+                                               : tree ? "tree finish"
+                                                      : "speculative finish");
                 instantiate_graph_family(family, label, device);
             }
 

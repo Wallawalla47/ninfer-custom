@@ -155,7 +155,7 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
             target_verify_forward(state.execution, card, verify, envelopes.target_verify);
             return;
         }
-        target_accept(state.execution, state.continuation_hidden_store, verify);
+        target_accept(state.execution, state.continuation_hidden_store, card, verify);
 
         {
             nvtx::ScopedRange draft_range(nvtx::Name::DecodeMtpDraft, nvtx::Category::Mtp,
