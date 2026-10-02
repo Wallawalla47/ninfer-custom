@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <iterator>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -320,9 +321,19 @@ ChatTurn parse_assistant_blocks(const Json& content) {
             }
             const std::string thinking =
                 require_string(block, "thinking", "messages", "thinking block");
-            // NInfer has no encrypted reasoning state to restore. The wire signature is therefore
-            // intentionally outside the lowered request; only visible Thinking reaches the model.
-            assistant.reasoning_content += thinking;
+            // Visible Thinking text is the prompt. A block returned under display:"omitted" has
+            // empty text and carries its reasoning in an NInfer signature; any other signature is
+            // transport metadata and stays outside the lowered request.
+            std::optional<std::string> hidden;
+            if (thinking.empty() && block.contains("signature") &&
+                block.at("signature").is_string()) {
+                try {
+                    hidden = decode_thinking_signature(block.at("signature").get<std::string>());
+                } catch (const std::invalid_argument& error) {
+                    bad_request(error.what(), "messages", "invalid_thinking_signature");
+                }
+            }
+            assistant.reasoning_content += hidden ? *hidden : thinking;
         } else if (type == "redacted_thinking") {
             if (cache_boundary(block, "messages")) {
                 bad_request("cache_control is not valid on redacted_thinking blocks", "messages",
@@ -833,7 +844,7 @@ void lower_tools(const Json& body, GenerationRequest& request) {
     }
 }
 
-void parse_thinking(const Json& body, GenerationRequest& request, ParsePurpose purpose) {
+void parse_thinking(const Json& body, GenerationRequest& request) {
     if (!body.contains("thinking") || body.at("thinking").is_null()) { return; }
     const Json& thinking = body.at("thinking");
     if (!thinking.is_object() || !thinking.contains("type") || !thinking.at("type").is_string()) {
@@ -870,12 +881,13 @@ void parse_thinking(const Json& body, GenerationRequest& request, ParsePurpose p
             bad_request("thinking.display is valid only when thinking is adaptive or enabled",
                         "thinking");
         }
-        if (purpose == ParsePurpose::Messages && display == "omitted") {
-            bad_request("thinking.display='omitted' requires encrypted hidden-reasoning restore "
-                        "semantics that NInfer does not provide",
-                        "thinking", "thinking_display_not_supported");
-        }
     }
+}
+
+bool thinking_display_omitted(const Json& body) {
+    if (!body.contains("thinking") || !body.at("thinking").is_object()) { return false; }
+    const Json& thinking = body.at("thinking");
+    return thinking.contains("display") && thinking.at("display") == "omitted";
 }
 
 void parse_effort(const Json& body, GenerationRequest& request, ParsePurpose purpose) {
@@ -1003,7 +1015,7 @@ void parse_common_prompt(const Json& body, GenerationRequest& request, ParsePurp
     lower_tools(body, request);
     parse_system(body, request);
     parse_messages(body, request);
-    parse_thinking(body, request, purpose);
+    parse_thinking(body, request);
     parse_effort(body, request, purpose);
     apply_anthropic_prompt_cache_policy(body, request);
     if (body.contains("container") && !body.at("container").is_null()) {
@@ -1049,6 +1061,7 @@ AnthropicMessagesRequest parse_anthropic_messages_request(const Json& body,
     }
 
     parse_common_prompt(body, result.generation, ParsePurpose::Messages);
+    result.hide_thinking = thinking_display_omitted(body);
     parse_generation_fields(body, result.generation);
     parse_structured_outputs(body, result.generation);
     return result;
