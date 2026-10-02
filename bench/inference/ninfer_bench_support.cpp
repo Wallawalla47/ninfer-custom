@@ -84,7 +84,9 @@ KvCacheStorage parse_kv_cache(std::string_view text) {
     if (text == "fp8") { return KvCacheStorage::Fp8E4M3Row256; }
     if (text == "nvfp4") { return KvCacheStorage::Nvfp4Group16; }
     if (text == "k8v4") { return KvCacheStorage::Fp8KeyNvfp4Value; }
-    throw std::invalid_argument("--kv-dtype must be bf16, int8, fp8, nvfp4, or k8v4");
+    if (text == "vq2") { return KvCacheStorage::Vq2; }
+    if (text == "k4v2") { return KvCacheStorage::Q4KeyVq2Value; }
+    throw std::invalid_argument("--kv-dtype must be bf16, int8, fp8, nvfp4, k8v4, vq2, or k4v2");
 }
 
 std::vector<int> parse_int_list(std::string_view value, const char* label) {
@@ -352,7 +354,7 @@ std::string usage_text(std::string_view program) {
         << "  --max-ctx <tokens>          override auto-sized context capacity\n"
         << "  --prefill-chunk <tokens>    multiple of " << kPrefillChunkAlignment
         << " (default: " << kDefaultPrefillChunk << ")\n"
-        << "  --kv-dtype <bf16|int8|fp8|nvfp4|k8v4>  KV cache storage (default: bf16)\n"
+        << "  --kv-dtype <bf16|int8|fp8|nvfp4|k8v4|vq2|k4v2>  KV cache storage (default: bf16)\n"
         << "  --use-original-int8-prefill-kernel  original INT8-KV prompt kernel at the\n"
         << "                              requested chunk (default: fast kernel, wave-aligned\n"
         << "                              chunks); requires --kv-dtype int8\n"
@@ -1100,6 +1102,10 @@ std::string kv_cache_name(KvCacheStorage storage) {
         return "nvfp4";
     case KvCacheStorage::Fp8KeyNvfp4Value:
         return "k8v4";
+    case KvCacheStorage::Vq2:
+        return "vq2";
+    case KvCacheStorage::Q4KeyVq2Value:
+        return "k4v2";
     }
     return "unknown";
 }

@@ -35,7 +35,7 @@ auto ordinary_batch_body(OrdinaryBatchContext& state, std::int32_t batch_size,
                                    state.execution.device.stream));
 
         TextContext card(state.execution.device, state.execution.parameters, state.execution.work,
-                         {}, state.execution.linear_attention, state.execution.io,
+                         {}, state.execution.state_images, state.execution.io,
                          state.execution.prefill_hidden, state.execution.prefill_chunk, 0, {},
                          &state.text_cache);
 
@@ -233,7 +233,7 @@ void ProgramImpl::enqueue_dflash_context_append(std::span<const std::uint32_t> l
     ops::prepare_ragged_prefix(dflash->pending_features, active_lane_tensor, device_starts,
                                device_ends, features, positions, device_counts, device.stream);
 
-    execution::DFlashAppendContext state{{device, parameters, work, state_images->linear(),
+    execution::DFlashAppendContext state{{device, parameters, work, *state_images,
                                           replay_records ? &*replay_records : nullptr, io,
                                           prefill_hidden, prefill_chunk, proposal_head,
                                           prompt_attention},
@@ -322,7 +322,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_ordinary_batch(
         }
 
         execution::OrdinaryBatchContext schedule_state{
-            {device, parameters, work, state_images->linear(),
+            {device, parameters, work, *state_images,
              replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
              proposal_head, prompt_attention},
             decoder->text_kv,
@@ -583,7 +583,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
         }
 
         execution::MtpBatchContext schedule_state{
-            {device, parameters, work, state_images->linear(), round_replay_records(verify_drafts),
+            {device, parameters, work, *state_images, round_replay_records(verify_drafts),
              io, prefill_hidden, prefill_chunk, proposal_head, prompt_attention},
             decoder->text_kv,
             *decoder->mtp_cache(),
@@ -871,7 +871,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
         }
 
         execution::DFlashBatchContext schedule_state{
-            {device, parameters, work, state_images->linear(),
+            {device, parameters, work, *state_images,
              round_replay_records(verify_drafts), io, prefill_hidden, prefill_chunk,
              proposal_head, prompt_attention},
             decoder->text_kv,
