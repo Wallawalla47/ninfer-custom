@@ -236,7 +236,7 @@ void ProgramImpl::enqueue_dflash_context_append(std::span<const std::uint32_t> l
     execution::DFlashAppendContext state{{device, parameters, work, state_images->linear(),
                                           replay_records ? &*replay_records : nullptr, io,
                                           prefill_hidden, prefill_chunk, proposal_head,
-                                          fast_prefill_kernel},
+                                          prompt_attention},
                                          *dflash};
     mark_workspace_usage(workspace_plan.dflash_context);
     execution::dflash_append_context(state, features, positions, device_counts,
@@ -324,7 +324,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_ordinary_batch(
         execution::OrdinaryBatchContext schedule_state{
             {device, parameters, work, state_images->linear(),
              replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
-             proposal_head, fast_prefill_kernel},
+             proposal_head, prompt_attention},
             decoder->text_kv,
             *io.ordinary,
             *ordinary_host_ingress,
@@ -584,7 +584,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
 
         execution::MtpBatchContext schedule_state{
             {device, parameters, work, state_images->linear(), round_replay_records(verify_drafts),
-             io, prefill_hidden, prefill_chunk, proposal_head, fast_prefill_kernel},
+             io, prefill_hidden, prefill_chunk, proposal_head, prompt_attention},
             decoder->text_kv,
             *decoder->mtp_cache(),
             *io.mtp_decode,
@@ -873,7 +873,7 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
         execution::DFlashBatchContext schedule_state{
             {device, parameters, work, state_images->linear(),
              round_replay_records(verify_drafts), io, prefill_hidden, prefill_chunk,
-             proposal_head, fast_prefill_kernel},
+             proposal_head, prompt_attention},
             decoder->text_kv,
             *dflash,
             frame,
