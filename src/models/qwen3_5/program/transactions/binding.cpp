@@ -90,6 +90,48 @@ void ProgramImpl::initialize_prefill(std::uint32_t lane, std::uint32_t base) {
     }
 }
 
+// Stages a hybrid binding's request state and unit demands before its capacity check. A failed
+// check resets requests[lane]; the ordinary path stages this state only after its check passes.
+void ProgramImpl::plan_binding_units(ContextTransaction& tx, const RequestBasePlan& base,
+                                     ResumeState* resume, ExecutionUnitKind resume_kind,
+                                     std::uint32_t resume_tokens) {
+    const bool own_snapshot = tx.resume_snapshot;
+    const auto lane         = tx.lane;
+    auto& state             = sequences[lane];
+    auto& request           = requests[lane];
+    state.lane              = lane;
+    request.base            = base.impl_;
+    request.lifecycle       = Lifecycle::Prefilling;
+    initialize_prefill(lane, tx.reuse_frontier);
+    UnitDemand first;
+    if (!resume) {
+        first = prefill_unit(base.summary().prompt_tokens, tx.reuse_frontier,
+                             initial_mtp_extent(*base.impl_));
+    } else if (!own_snapshot) {
+        first = {.kind          = ExecutionUnitKind::Replay,
+                 .main_frontier = std::min(tx.reuse_frontier + prefill_chunk, resume->frontier())};
+        first.backend_frontier = backend_kv_cache() ? first.main_frontier : 0;
+    } else {
+        first =
+            next_unit(resume->impl_->sequence, resume->impl_->control, resume_kind, resume_tokens);
+    }
+    tx.first_unit         = first;
+    tx.reservation_demand = first;
+    if (resume) {
+        const auto& resumed_sequence = resume->impl_->sequence;
+        auto coverage =
+            next_unit(resumed_sequence, resume->impl_->control, resume_kind, resume_tokens);
+        coverage.main_frontier = std::max(coverage.main_frontier, resume->frontier());
+        if (backend_kv_cache()) {
+            coverage.backend_frontier = std::max(coverage.backend_frontier, resume->frontier());
+        }
+        tx.recovery           = RecoveryPermit{.coverage      = coverage,
+                                               .frontier      = resume->frontier(),
+                                               .ledger_tokens = resumed_sequence.ledger.size()};
+        tx.reservation_demand = coverage;
+    }
+}
+
 BindingReservation ProgramImpl::start_binding(const RequestBasePlan& base, runtime::LaneId lane_id,
                                               const SourceCandidate& candidate, ResumeState* resume,
                                               ExecutionUnitKind resume_kind,
@@ -98,6 +140,9 @@ BindingReservation ProgramImpl::start_binding(const RequestBasePlan& base, runti
     if (context_transaction_ || lane >= max_concurrency ||
         requests[lane].lifecycle != Lifecycle::Empty || !base.impl_) {
         throw std::logic_error("binding requires a free lane and context transaction slot");
+    }
+    if (candidate.hybrid) {
+        return start_hybrid_binding(base, lane, candidate, resume, resume_kind, resume_tokens);
     }
     const bool own_snapshot = resume && resume->has_snapshot();
     const auto source       = own_snapshot ? resume->impl_->snapshot : candidate.checkpoint;
@@ -534,6 +579,10 @@ void ProgramImpl::prepare_binding(ContextTransaction& tx) {
 }
 
 void ProgramImpl::complete_binding(ContextTransaction& tx, ContextProgress& out) {
+    if (tx.hybrid) {
+        complete_hybrid_binding(tx, out);
+        return;
+    }
     // All allocating request installation happens before the irreversible ownership handoff.
     sequences[tx.lane].kv = tx.binding_history;
     install_binding(tx);
