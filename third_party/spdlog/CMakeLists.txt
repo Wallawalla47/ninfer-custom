@@ -13,3 +13,11 @@ target_compile_definitions(ninfer_third_party_spdlog PUBLIC SPDLOG_COMPILED_LIB)
 target_include_directories(ninfer_third_party_spdlog SYSTEM PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(ninfer_third_party_spdlog PUBLIC Threads::Threads)
+
+# spdlog's bundled fmt enables Unicode support and static_asserts unless the compiler is
+# told the source/execution charset is UTF-8. Non-UTF-8 ANSI locales (e.g. a German
+# Windows install, codepage 1252) trip that assert. PUBLIC: the spdlog headers are a
+# public include, so every TU that pulls them in needs the flag too.
+if(MSVC)
+  target_compile_options(ninfer_third_party_spdlog PUBLIC /utf-8)
+endif()

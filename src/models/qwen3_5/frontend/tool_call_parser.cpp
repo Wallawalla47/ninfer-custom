@@ -971,7 +971,10 @@ ToolCallOutputDecoder::ToolCallOutputDecoder(std::shared_ptr<const ToolCallOutpu
 std::string ToolCallOutputDecoder::feed(std::string_view text) {
     if (finished_) { throw std::logic_error("tool-call output decoder is already finished"); }
     if (text.empty()) { return {}; }
-    if (!contract_) { return std::string(text); }
+    if (!contract_) {
+        published_content_ = true;
+        return std::string(text);
+    }
     if (saw_tool_marker_) {
         tool_region_.append(text);
         return {};
@@ -1010,7 +1013,25 @@ std::string ToolCallOutputDecoder::feed(std::string_view text) {
             visible.push_back(byte);
         }
     }
+    if (!visible.empty()) { published_content_ = true; }
     return visible;
+}
+
+void ToolCallOutputDecoder::feed_reasoning_recovery(std::string_view reasoning) {
+    if (finished_ || !tolerant_ || saw_tool_marker_ || published_content_ || reasoning.empty()) {
+        return;
+    }
+    // The stranded call is the last tool region in the thinking stream; any planning prose
+    // before it stays reasoning and is never republished as call bytes.
+    std::size_t marker = std::string_view::npos;
+    for (const std::string_view candidate : kToolMarkers) {
+        const std::size_t found = reasoning.rfind(candidate);
+        if (found != std::string_view::npos && (marker == std::string_view::npos || found > marker)) {
+            marker = found;
+        }
+    }
+    if (marker == std::string_view::npos) { return; }
+    (void)feed(reasoning.substr(marker));
 }
 
 ToolCallOutputDecoder::Terminal ToolCallOutputDecoder::finish() {

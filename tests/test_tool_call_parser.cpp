@@ -1265,6 +1265,75 @@ int test_tolerant_undeclared_and_value_cut() {
     return failures;
 }
 
+// Shape (c): the model ends the turn inside its thinking (no closing think tag), so a complete
+// Qwen call that sits in the reasoning stream never reaches the content channel and feed() never
+// sees it. The terminal recovery pass recovers it from the reasoning text.
+int test_reasoning_stranded_recovery() {
+    const auto contract =
+        output_contract_for("delete_file", Json{{"filePath", Json{{"type", "string"}}}});
+    const std::string open_tag  = std::string("<") + "parameter=filePath>\n";
+    const std::string close_tag = std::string("</") + "parameter>";
+    const std::string planning =
+        "The user wants the stale config removed, so I'll call delete_file.\n";
+    const std::string call = "<tool_call>\n"
+                             "<function=delete_file>\n" +
+                             open_tag + "/tmp/stale.cfg\n" + close_tag +
+                             "\n</function>\n</tool_call>";
+    const std::string stranded = planning + call;
+
+    int failures = 0;
+
+    // T1: a complete call stranded in the reasoning stream is recovered; the planning prose that
+    // precedes it is not turned into visible content.
+    {
+        fi::ToolCallOutputDecoder decoder(contract, 64, /*tolerant*/ true);
+        decoder.feed_reasoning_recovery(stranded);
+        const auto terminal = decoder.finish();
+        failures += check(terminal.tool_calls.size() == 1,
+                          "a stranded reasoning call was not recovered");
+        failures += check(terminal.content.empty(),
+                          "reasoning prose leaked into content while recovering a stranded call");
+        if (terminal.tool_calls.size() == 1) {
+            failures += check(terminal.tool_calls.front().name == "delete_file",
+                              "the recovered stranded call lost its name");
+            const Json args = Json::parse(terminal.tool_calls.front().arguments_json);
+            failures += check(args.at("filePath").get<std::string>() == "/tmp/stale.cfg",
+                              "the recovered stranded call lost its argument");
+        }
+    }
+
+    // T2: reasoning with no call yields no phantom tool call.
+    {
+        fi::ToolCallOutputDecoder decoder(contract, 64, /*tolerant*/ true);
+        decoder.feed_reasoning_recovery("Just thinking, with no call anywhere in here.\n");
+        const auto terminal = decoder.finish();
+        failures += check(terminal.tool_calls.empty(),
+                          "reasoning without a call produced a phantom tool call");
+    }
+
+    // Gate: once the content channel has published visible text, the reasoning stream is not
+    // scavenged, so a normal prose answer that merely quotes a call in its thinking is untouched.
+    {
+        fi::ToolCallOutputDecoder decoder(contract, 64, /*tolerant*/ true);
+        const std::string visible = decoder.feed("Here is my answer.\n");
+        failures += check(!visible.empty(), "content feed published nothing");
+        decoder.feed_reasoning_recovery(stranded);
+        const auto terminal = decoder.finish();
+        failures += check(terminal.tool_calls.empty(),
+                          "reasoning was scavenged after the content channel published text");
+    }
+
+    // Strict mode is unchanged: recovery is dropped without the tolerant opt-in.
+    {
+        fi::ToolCallOutputDecoder decoder(contract, 64, /*tolerant*/ false);
+        decoder.feed_reasoning_recovery(stranded);
+        const auto terminal = decoder.finish();
+        failures += check(terminal.tool_calls.empty(),
+                          "strict mode scavenged the reasoning stream");
+    }
+    return failures;
+}
+
 int main() {
     int failures = 0;
     failures += test_duplicate_parameter_keeps_last_value();
@@ -1299,6 +1368,7 @@ int main() {
     failures += test_tolerant_truncated_final_call();
     failures += test_tolerant_missing_function_close_bracket();
     failures += test_tolerant_undeclared_and_value_cut();
+    failures += test_reasoning_stranded_recovery();
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
 }

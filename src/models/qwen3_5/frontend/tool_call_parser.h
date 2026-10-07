@@ -87,6 +87,15 @@ public:
     [[nodiscard]] std::string feed(std::string_view text);
     [[nodiscard]] Terminal finish();
 
+    // Terminal-time recovery for a call stranded in the reasoning stream: the model ended the
+    // turn without closing its thinking, so the call markup never reached the content channel
+    // and feed() never saw it. Feeds only the bytes from the last tool marker to the end of
+    // `reasoning`, so finish() can retain a complete (tolerant) call while the planning prose
+    // before the marker stays reasoning. No-op unless tolerant mode is active, and no-op once
+    // the content channel produced a tool marker or published any visible content, so a normal
+    // prose answer that merely quotes a call in its thinking is never overridden.
+    void feed_reasoning_recovery(std::string_view reasoning);
+
 private:
     std::shared_ptr<const ToolCallOutputContract> contract_;
     std::string trailing_whitespace_;
@@ -95,6 +104,7 @@ private:
     std::size_t max_tool_name_length_ = 0;
     bool tolerant_                    = false;
     bool saw_tool_marker_             = false;
+    bool published_content_           = false;
     bool finished_                    = false;
 };
 

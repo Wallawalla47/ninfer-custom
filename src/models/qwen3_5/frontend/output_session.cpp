@@ -409,6 +409,9 @@ public:
     fi::ToolCallOutputDecoder tool_call_output;
     std::vector<GeneratedToolCall> tool_calls;
     ToolCallParseDiagnostics tool_call_parse;
+    // The reasoning channel is never fed to the tool-call decoder (a call stranded there must not
+    // leak into content), so its text is accumulated here for the terminal-time recovery pass.
+    std::string reasoning_buffer;
     bool preview_ready = false;
 };
 
@@ -676,9 +679,15 @@ PublishedOutput OutputSession::commit_preview() {
     for (OutputDelta& delta : output) {
         if (delta.channel == OutputChannel::Content) {
             delta.text = impl_->tool_call_output.feed(delta.text);
+        } else if (delta.channel == OutputChannel::Reasoning) {
+            impl_->reasoning_buffer.append(delta.text);
         }
     }
     if (impl_->state.terminal) {
+        // Shape (c): the model stopped inside its thinking, so a complete call can be stranded in
+        // the reasoning stream where feed() never saw it. The recovery is a no-op unless the call
+        // is genuinely there and no content was published, so normal turns are untouched.
+        impl_->tool_call_output.feed_reasoning_recovery(impl_->reasoning_buffer);
         fi::ToolCallOutputDecoder::Terminal terminal = impl_->tool_call_output.finish();
         impl_->tool_calls                            = std::move(terminal.tool_calls);
         impl_->tool_call_parse                       = terminal.diagnostics;
