@@ -235,7 +235,9 @@ numeric endpoints and JSON publication rounding. HTTP parsing tests check schema
 before protocol adapters serialize the schema.
 
 `ninfer_qwen3_5_grammar_real_test [none|mtp|dflash|dflash2] [graph|eager] [concurrency] [vision]` uses
-`NINFER_TEST_DRAFT_TOKENS` to override the default draft count of three and
+`NINFER_TEST_DRAFT_TOKENS` to override the default draft count of three,
+`NINFER_TEST_NGRAM_DRAFT_TOKENS` to add n-gram copy rounds, `NINFER_TEST_DRAFT_TREE_NODES` to give
+DFlash2 a tree width for every batch size (constrained rounds still verify chains), and
 `NINFER_TEST_ARTIFACT` to check GBNF/JSON/schema/choice/regex content, sampling, thinking, continuation, prefix reuse
 and mixed batches. `ninfer_regex_choice_test` checks literal-set prefix masks and regex edge cases;
 `python3 tests/text/test_regex_choice.py` compares regex membership with independent fullmatch semantics.

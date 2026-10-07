@@ -167,6 +167,16 @@ int main(int argc, char** argv) {
             const auto draft_tokens           = std::getenv("NINFER_TEST_DRAFT_TOKENS");
             options.speculative.draft_tokens  = draft_tokens ? std::stoul(draft_tokens) : 3;
             options.speculative.proposal_head = ninfer::ProposalHead::Optimized;
+            // Copy rounds verify their own drafts against the grammar masks.
+            if (const char* ngram = std::getenv("NINFER_TEST_NGRAM_DRAFT_TOKENS")) {
+                options.speculative.ngram_draft_tokens = std::stoul(ngram);
+                options.speculative.ngram_min_match    = 4;
+            }
+            // A DFlash2 tree width for every batch size: rounds with a constrained row still
+            // verify the chain, unconstrained rows of the mixed batches verify trees.
+            if (const char* tree = std::getenv("NINFER_TEST_DRAFT_TREE_NODES")) {
+                options.speculative.draft_tree_nodes.fill(std::stoul(tree));
+            }
         }
         ninfer::Engine engine(options);
         choice_and_regex(engine, options.max_concurrency, backend != "none");
