@@ -75,6 +75,9 @@ build_native.bat configure
 build_native.bat build
 ```
 
+Sources compile as UTF-8 (`/utf-8`), so the build works under any Windows system code page
+(reported by Woesch-Nich; commit [`965ad6f`][c-msvc-utf8]).
+
 The server is `build-windows\apps\Release\ninfer-serve.exe`, with the FFmpeg, curl and zlib DLLs
 copied next to it. The launch I use on a single 32 GB RTX 5090 (stop any other resident model
 first):
@@ -652,8 +655,12 @@ when upstream replaced it in `abb7f14f`.
   output limit (if a parameter is complete), repairs a missing `>` after the function name, and
   returns calls to undeclared tools. By David Oelfke in the gzenz/ninfer fork, ported onto this
   fork's parser. The request log's `tool_call_parse.tolerant_recovered` shows when it rescued a
-  call (from giveen's giveen/ninfer-ext). Commits: [`8c3409a`][c-tolerant-tools],
-  [`41a7df0`][c-tolerant-recovered].
+  call (from giveen's giveen/ninfer-ext). It also returns complete calls a model strands in
+  thinking it never closed before ending its turn (free tool output, `tool_constraints:"auto"`;
+  the default constrained output cannot end inside thinking), logged as
+  `tool_call_parse.recovered_from_reasoning`. Based on Woesch-Nich's PR #3 and Hundsbuah's review
+  of it. Commits: [`8c3409a`][c-tolerant-tools], [`41a7df0`][c-tolerant-recovered],
+  [`813355b`][c-stranded-calls].
 - **A reasoning effort the chat template rejects renders as its nearest accepted one** (the
   official Qwen3.8 template accepts only low, medium and xhigh), and `--chat-template` gains the
   froggeric v22.5 template. Commits: [`41b75f9`][c-effort-nearest],
@@ -744,10 +751,11 @@ when upstream replaced it in `abb7f14f`.
 
 - **`--log-colours on`** colours the console statistics, and a **session statistics panel**
   beneath the log shows session and last-ten averages of TTFT, cache hit rate, prefill and decode
-  speed, the mean decode batch and drafter acceptance (`--log-stats-panel off` removes it). Engine
-  messages and FFmpeg's log are ordinary log records that scroll above the panel.
+  speed, the mean decode batch and drafter acceptance (`--log-stats-panel off` removes it); its
+  n-gram columns appear only with n-gram drafting. Engine messages and FFmpeg's log are ordinary
+  log records that scroll above the panel.
   Commits: [`73767bc`][c-log-colours], [`1739b2f`][c-stats-panel],
-  [`128dc5e`][c-diagnostics], [`493babf`][c-ffmpeg-log].
+  [`128dc5e`][c-diagnostics], [`493babf`][c-ffmpeg-log], [`43421e5`][c-stats-ngram].
 - **Grouped `--help`** by category on `ninfer-serve` and the `ninfer` CLI, with separate sections
   for the two prefix caching systems. Commit: [`27bbd2b`][c-help].
 - **`--vram-headroom-mib N`** sets how much GPU memory `--kv-capacity auto` leaves spare (upstream
@@ -865,7 +873,9 @@ A big thank you to all the contributors to upstream NInfer and to the forks this
 [Sha1rholder](https://github.com/Sha1rholder),
 [adubkov](https://github.com/adubkov),
 [Gideon Zenz (gzenz)](https://github.com/gzenz),
-[cometkim (Hyeseong Kim)](https://github.com/cometkim), David Oelfke, Fedor Suchkov,
+[cometkim (Hyeseong Kim)](https://github.com/cometkim),
+[Woesch-Nich](https://github.com/Woesch-Nich), [Hundsbuah](https://github.com/Hundsbuah),
+David Oelfke, Fedor Suchkov,
 Yunado, and everyone else whose pull
 requests, reviews and commits made this fork possible — and a particular thank you to
 **[Neroued](https://github.com/Neroued)** for creating NInfer, maintaining upstream so
@@ -937,6 +947,9 @@ well, and for the work this branch builds on.
 [c-nvfp4-mse]: https://github.com/Wallawalla47/ninfer-custom/commit/deeb2b3513c93153219346335e5929e2ed914e2e
 [c-thinking-omitted]: https://github.com/Wallawalla47/ninfer-custom/commit/a3b2b648576b6af2b3a17033619fd8555c017118
 [c-tolerant-recovered]: https://github.com/Wallawalla47/ninfer-custom/commit/41a7df062991f29799b7c0c046aed60798f7c23e
+[c-stranded-calls]: https://github.com/Wallawalla47/ninfer-custom/commit/813355b35bd848d63e268e35bf5e025a295b1807
+[c-msvc-utf8]: https://github.com/Wallawalla47/ninfer-custom/commit/965ad6f2a2add7f19e9c4e52a1a3a23e9e670529
+[c-stats-ngram]: https://github.com/Wallawalla47/ninfer-custom/commit/43421e51ac3c4714955be47e86fe5637dae3ed52
 
 ---
 
