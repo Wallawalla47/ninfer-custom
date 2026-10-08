@@ -707,6 +707,14 @@ when upstream replaced it in `abb7f14f`.
   Commits: [`07aa6ff`][c-arena-scope], [`3fc84ae`][c-idle-503],
   [`5d01a16`][c-count-bound], [`8162985`][c-win-keepalive],
   [`39b7f1a`][c-pr1].
+- **Fixes for upstream issues not yet fixed upstream:** NVFP4 linear_add rounds its fused
+  residual add the same way whether or not a token tile is full, so a token's prefill result no
+  longer depends on how many tokens share its chunk (#374); the request log counts the model's
+  thinking tokens without a thinking budget (#373); weight staging reads into an aligned address
+  inside each pinned buffer (#372), all reported by ValerioDolci; Linux direct reads continue across
+  short reads from network and FUSE filesystems (#381, reported by lonelystarCX).
+  Commits: [`21ef823`][c-up374], [`b278ba5`][c-up373], [`7a75da4`][c-up372],
+  [`713f802`][c-up381].
 
 ### Models, conversion and vision
 
@@ -919,6 +927,10 @@ well, and for the work this branch builds on.
 [c-thinking-budget-max]: https://github.com/Wallawalla47/ninfer-custom/commit/c5c6098a2d90d601f9402151e496c9a730b8540d
 [c-doubled-v1]: https://github.com/Wallawalla47/ninfer-custom/commit/5eb36c5a1f696ff7c22036238733d435eb8b0ed2
 [c-kv-fence]: https://github.com/Wallawalla47/ninfer-custom/commit/48fc6255b8ca0d6dad0c63efdf9d6839b6bfd3ce
+[c-up374]: https://github.com/Wallawalla47/ninfer-custom/commit/21ef82324871fee6c74a3623012b31731d25ac9e
+[c-up373]: https://github.com/Wallawalla47/ninfer-custom/commit/b278ba5733b8e8009966a72dc88b92e8ba4e4fcf
+[c-up372]: https://github.com/Wallawalla47/ninfer-custom/commit/7a75da46c6f5a1285621045b609ef0e157c554b2
+[c-up381]: https://github.com/Wallawalla47/ninfer-custom/commit/713f802856c055a155febe422a071feacbe9e930
 [c-arena-scope]: https://github.com/Wallawalla47/ninfer-custom/commit/07aa6ff73d5cb0b155e02e0bc2736187cdeca549
 [c-idle-503]: https://github.com/Wallawalla47/ninfer-custom/commit/3fc84aedafd709b83d43c66fe2624a75707b1241
 [c-count-bound]: https://github.com/Wallawalla47/ninfer-custom/commit/5d01a16279be91458dcb4d87db3c1bbfebd42f93
