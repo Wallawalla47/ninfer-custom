@@ -862,7 +862,15 @@ Both are single-file `.ninfer` artifacts for an RTX 5090 (`sm_120a`); each Huggi
 the creation outline and conversion report. The [Quick start](#quick-start-windows) launch works
 for either.
 
+## Support
+
+This fork is developed with Claude Code. If you would like to help pay for that subscription, you can
+[sponsor me on GitHub](https://github.com/sponsors/Wallawalla47).
+
 ## Thanks
+
+Please support [Neroued](https://github.com/Neroued), the creator of the original NInfer,
+[on Ko-fi](https://ko-fi.com/neroued).
 
 A big thank you to all the contributors to upstream NInfer and to the forks this one draws on —
 [Neroued](https://github.com/Neroued),
