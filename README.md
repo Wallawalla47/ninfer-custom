@@ -1,5 +1,12 @@
 # NInfer — custom fork
 
+> **Check out [Infernix](https://github.com/Wallawalla47/Infernix) instead.** It is my new, revised
+> engine grown from this fork, with new features including support for the
+> Qwen3.8-Flash-Next-NVIDIA-NVFP4 models
+> ([Dense8](https://huggingface.co/Wallawalla47/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Dense8-Infernix) and
+> [bit-exact](https://huggingface.co/Wallawalla47/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Infernix)
+> conversions), and I recommend it over this fork.
+
 > **AI disclaimer:** Everything added to this fork, including most of this README, was written with
 > AI (mostly Claude Opus 5.5, Qwen3.8-27B running on NInfer, plus a few other AI systems I’ve been
 > testing). It is likely to be neither complete nor entirely accurate. This is hobby development.
